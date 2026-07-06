@@ -81,7 +81,7 @@ The workflow is:
 3. Let the user log in manually.
 4. For each watched creator, automatically open Xiaohongshu search, click the best matching creator/profile result, and wait for the page to render.
 5. Detect likely yesterday posts, open each post detail page, and extract visible title/body/metrics/source link.
-6. If a visible video element is present, play it muted in the user's logged-in browser and save a few screenshot frames for AI-assisted visual review. Do not claim audio transcription unless captions or text are visible.
+6. If a visible video element is present, play it muted in the user's logged-in browser until the browser reports the video has ended, or until the configured maximum video wait time is reached. Save screenshot frames across playback for AI-assisted visual review. Do not claim audio transcription unless captions or text are visible. If full playback cannot be confirmed, say so explicitly in the brief.
 7. Save an internal JSON collection package.
 8. Generate the Markdown brief with `scripts/daily_brief.py --package ...` and paste the report body directly in the chat.
 
@@ -116,7 +116,7 @@ For each watched creator, include:
 - creator account name
 - follower count on the report day or latest available snapshot
 - follower change versus the previous day
-- yesterday's published post summaries based on detail-page text and, for videos, visible sampled frames/captions when available
+- yesterday's published post summaries based on detail-page text and, for videos, full visible playback plus sampled frames/captions when available
 - content analysis for each post and an overall analysis section
 - likes, collects, comments for each yesterday post
 - original Xiaohongshu link for each post
@@ -124,6 +124,11 @@ For each watched creator, include:
 - the requested output detail level: minimal, normal, or detailed
 
 If a creator has no matching post yesterday, show that explicitly.
+
+For video posts, each post must include two separate natural-language paragraphs:
+
+- a video content summary paragraph that describes what the video is about, using visible title, body text, captions, on-screen text, and sampled frames from full playback
+- a video analysis paragraph that interprets why the content may work, what audience or hook it targets, and what can be learned from it
 
 ## Scripts
 

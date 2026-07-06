@@ -14,6 +14,7 @@ function parseArgs(argv) {
     manualFallback: false,
     detailLimit: 6,
     playSeconds: 12,
+    maxVideoSeconds: 600,
   };
   for (let i = 2; i < argv.length; i += 1) {
     const arg = argv[i];
@@ -27,6 +28,7 @@ function parseArgs(argv) {
     else if (arg === "--no-manual-fallback") args.manualFallback = false;
     else if (arg === "--detail-limit") args.detailLimit = Number(requireValue(arg, next)), i += 1;
     else if (arg === "--play-seconds") args.playSeconds = Number(requireValue(arg, next)), i += 1;
+    else if (arg === "--max-video-seconds") args.maxVideoSeconds = Number(requireValue(arg, next)), i += 1;
     else if (arg === "--help" || arg === "-h") {
       printHelp();
       process.exit(0);
@@ -53,6 +55,9 @@ function validateArgs(args) {
   if (!Number.isFinite(args.playSeconds) || args.playSeconds < 0 || args.playSeconds > 120) {
     throw new Error("--play-seconds must be a number from 0 to 120.");
   }
+  if (!Number.isFinite(args.maxVideoSeconds) || args.maxVideoSeconds < 10 || args.maxVideoSeconds > 1800) {
+    throw new Error("--max-video-seconds must be a number from 10 to 1800.");
+  }
 }
 
 function printHelp() {
@@ -65,7 +70,8 @@ Options:
   --out-dir <path>       Directory for the collection package and generated screenshots.
   --profile-dir <path>   Browser profile directory for your manual login session.
   --detail-limit <n>     Max yesterday posts to open per creator. Default: 6.
-  --play-seconds <n>     Seconds to let visible videos play before extracting. Default: 12.
+  --play-seconds <n>     Fallback seconds when visible video duration cannot be read. Default: 12.
+  --max-video-seconds <n> Maximum seconds to wait while playing a video to completion. Default: 600.
   --headless             Run headless. Not recommended because login needs a visible browser.
   --manual-fallback      Pause for user intervention if automatic navigation cannot find a creator page.
   --no-manual-fallback   Do not pause if automatic navigation cannot find a creator page. Default.
@@ -438,27 +444,68 @@ function safeFilePart(value) {
   return String(value || "note").replace(/^@/, "").replace(/[^\p{L}\p{N}_-]+/gu, "_").slice(0, 80) || "note";
 }
 
-async function tryPlayVisibleMedia(page, seconds) {
+async function startVisibleMedia(page) {
   const result = await page.evaluate(() => {
     const media = Array.from(document.querySelectorAll("video, audio"));
     let videoCount = 0;
     let audioCount = 0;
     let attempted = 0;
+    const visibleVideos = [];
     for (const item of media) {
-      if (item.tagName.toLowerCase() === "video") videoCount += 1;
-      if (item.tagName.toLowerCase() === "audio") audioCount += 1;
+      const tag = item.tagName.toLowerCase();
+      const rect = item.getBoundingClientRect();
+      const visible = rect.width > 20 && rect.height > 20 && rect.bottom >= 0 && rect.right >= 0 && rect.top <= window.innerHeight && rect.left <= window.innerWidth;
+      if (tag === "video") {
+        videoCount += 1;
+        if (visible) visibleVideos.push(item);
+      }
+      if (tag === "audio") audioCount += 1;
       try {
         item.muted = true;
+        item.loop = false;
         item.playbackRate = 1;
+        if (Number.isFinite(item.duration) && item.duration > 0 && item.ended) item.currentTime = 0;
         const promise = item.play();
         if (promise && typeof promise.catch === "function") promise.catch(() => {});
         attempted += 1;
       } catch (_) {}
     }
-    return { video_count: videoCount, audio_count: audioCount, play_attempted: attempted };
+    const primary = visibleVideos[0] || media.find((item) => item.tagName.toLowerCase() === "video") || media[0];
+    const duration = primary && Number.isFinite(primary.duration) ? primary.duration : 0;
+    const currentTime = primary && Number.isFinite(primary.currentTime) ? primary.currentTime : 0;
+    const remaining = duration > 0 ? Math.max(0, duration - currentTime) : 0;
+    return {
+      video_count: videoCount,
+      audio_count: audioCount,
+      play_attempted: attempted,
+      duration_seconds: duration || 0,
+      current_time_seconds: currentTime || 0,
+      remaining_seconds: remaining,
+      duration_known: duration > 0,
+      ended: Boolean(primary && primary.ended),
+    };
   }).catch(() => ({ video_count: 0, audio_count: 0, play_attempted: 0 }));
-  if (result.play_attempted) await sleep(Math.max(1000, seconds * 1000));
   return result;
+}
+
+async function mediaPlaybackStatus(page) {
+  return page.evaluate(() => {
+    const videos = Array.from(document.querySelectorAll("video"));
+    const primary = videos.find((item) => {
+      const rect = item.getBoundingClientRect();
+      return rect.width > 20 && rect.height > 20 && rect.bottom >= 0 && rect.right >= 0 && rect.top <= window.innerHeight && rect.left <= window.innerWidth;
+    }) || videos[0];
+    if (!primary) return {};
+    const duration = Number.isFinite(primary.duration) ? primary.duration : 0;
+    const currentTime = Number.isFinite(primary.currentTime) ? primary.currentTime : 0;
+    return {
+      ended: Boolean(primary.ended),
+      paused: Boolean(primary.paused),
+      duration_seconds: duration || 0,
+      current_time_seconds: currentTime || 0,
+      remaining_seconds: duration > 0 ? Math.max(0, duration - currentTime) : 0,
+    };
+  }).catch(() => ({}));
 }
 
 async function clickPostFromProfile(page, post) {
@@ -508,13 +555,41 @@ async function extractDetailPage(page, creator, post, args, postDate, index, pro
     await safeGoto(page, post.url);
     await sleep(2500);
   }
-  const media = await tryPlayVisibleMedia(page, args.playSeconds);
+  const media = await startVisibleMedia(page);
   const frames = [];
-  for (let i = 0; i < 3; i += 1) {
-    const framePath = path.join(frameDir, `frame-${String(i + 1).padStart(2, "0")}.png`);
+  const captureFrame = async (slot) => {
+    const framePath = path.join(frameDir, `frame-${String(slot).padStart(2, "0")}.png`);
     await page.screenshot({ path: framePath, fullPage: false }).catch(() => {});
-    if (fs.existsSync(framePath)) frames.push(framePath);
-    if (i < 2 && media.play_attempted) await sleep(2500);
+    if (fs.existsSync(framePath) && !frames.includes(framePath)) frames.push(framePath);
+  };
+
+  if (media.play_attempted && media.video_count) {
+    const durationKnown = Boolean(media.duration_known);
+    const targetSeconds = durationKnown
+      ? Math.min(args.maxVideoSeconds, Math.ceil(media.remaining_seconds) + 1)
+      : args.playSeconds;
+    const checkpoints = targetSeconds > 4 ? [0, targetSeconds / 2, targetSeconds] : [0, Math.max(0, targetSeconds)];
+    let elapsed = 0;
+    for (let i = 0; i < checkpoints.length; i += 1) {
+      const waitSeconds = Math.max(0, checkpoints[i] - elapsed);
+      if (waitSeconds) await sleep(waitSeconds * 1000);
+      elapsed += waitSeconds;
+      await captureFrame(i + 1);
+    }
+    const status = await mediaPlaybackStatus(page);
+    media.playback_wait_seconds = Math.round(targetSeconds);
+    media.playback_completed = Boolean(
+      durationKnown
+      && (media.ended || status.ended || (status.duration_seconds > 0 && status.remaining_seconds <= 0.75))
+    );
+    media.playback_limited = Boolean(durationKnown && !status.ended && targetSeconds >= args.maxVideoSeconds);
+    media.duration_seconds = status.duration_seconds || media.duration_seconds || 0;
+    media.current_time_seconds = status.current_time_seconds || media.current_time_seconds || 0;
+  } else {
+    for (let i = 0; i < 3; i += 1) {
+      await captureFrame(i + 1);
+      if (i < 2) await sleep(1000);
+    }
   }
 
   const detail = await page.evaluate(() => {
@@ -739,11 +814,14 @@ async function extractDetailPage(page, creator, post, args, postDate, index, pro
     warnings: [
       ...(detail.extraction_error ? [`detail extraction error: ${detail.extraction_error}`] : []),
       ...(!missingPage && !detail.metrics.likes && !detail.metrics.collects && !detail.metrics.comments ? ["engagement metrics not found in visible action bar"] : []),
+      ...(!missingPage && media.video_count && !media.playback_completed ? ["full video playback could not be confirmed; report analysis is based on visible text and sampled frames"] : []),
     ],
     extraction_note: missingPage
       ? "The script found this post on the creator page, but the detail page could not be opened from the visible browser session; summary falls back to the visible card text."
       : media.video_count
-      ? "Visible video was played muted and sampled with screenshots; audio/transcription is available only if visible captions/text are present on page."
+      ? media.playback_completed
+        ? `Visible video was played muted through the end (${Math.round(media.duration_seconds || 0)}s) and sampled with screenshots; audio/transcription is available only if visible captions/text are present on page.`
+        : `Visible video was played muted and sampled with screenshots, but full playback completion could not be confirmed within ${media.playback_wait_seconds || args.playSeconds}s; audio/transcription is available only if visible captions/text are present on page.`
       : "Detail page text and visible images were captured; no playable video element was detected.",
     detail_captured_at: new Date().toISOString(),
   };

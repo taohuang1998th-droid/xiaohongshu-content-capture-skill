@@ -332,9 +332,77 @@ def chinese_sentences(text):
     return [part.strip() for part in parts if len(part.strip()) >= 8]
 
 
+def strip_noise(text):
+    clean = re.sub(r"\s+", " ", str(text or "")).strip()
+    clean = re.sub(r"#\S+", "", clean)
+    clean = re.sub(r"@\S+", "", clean)
+    clean = re.sub(r"(赞|收藏|评论|回复|展开|收起)\s*\d+(?:\.\d+)?[万wkWK]?", "", clean)
+    clean = re.sub(r"(昨天|今天|\d+小时前|\d+分钟前)\s*\d{1,2}:\d{2}?", "", clean)
+    clean = re.sub(r"\s+", " ", clean).strip(" ，。|｜:-")
+    return clean
+
+
+def extract_hashtags(text):
+    return [tag.strip("#") for tag in re.findall(r"#([\w\u4e00-\u9fff-]+)", str(text or "")) if tag.strip("#")]
+
+
+def video_summary_zh(post, limit):
+    title = (post.get("title") or "").replace(" - 小红书", "").strip()
+    text = content_source(post)
+    cleaned = strip_noise(text)
+    tags = extract_hashtags(text)
+    media = post.get("media") or {}
+    playback = "已在可见浏览器中完整播放并抽取画面" if media.get("playback_completed") else "已在可见浏览器中尝试播放并抽取画面，但系统未能确认播放到结尾"
+    sentence = ""
+    sentences = chinese_sentences(cleaned)
+    if sentences:
+        sentence = " ".join(sentences[:2])
+    elif cleaned and cleaned != title:
+        sentence = cleaned
+
+    if sentence:
+        summary = f"这条视频围绕“{title or '该主题'}”展开，{playback}。页面可见正文显示：{sentence}"
+    elif tags:
+        summary = f"这条视频围绕“{title or '该主题'}”展开，{playback}。可见信息主要指向{ '、'.join(tags[:5]) }等主题；由于页面没有暴露完整字幕或口播文本，内容总结主要依据标题、可见标签和播放过程中的抽帧画面。"
+    else:
+        summary = f"这条视频围绕“{title or '该主题'}”展开，{playback}；由于页面没有暴露完整字幕或口播文本，内容总结主要依据标题和播放过程中的抽帧画面。"
+    return summarize(summary, limit)
+
+
+def video_summary_en(post, limit):
+    title = (post.get("title") or "").replace(" - 小红书", "").strip()
+    text = content_source(post)
+    cleaned = strip_noise(text)
+    tags = extract_hashtags(text)
+    media = post.get("media") or {}
+    playback = "was played through in the visible browser and sampled with frames" if media.get("playback_completed") else "was played and sampled in the visible browser, but completion could not be confirmed"
+    sentence = ""
+    sentences = chinese_sentences(cleaned)
+    if sentences:
+        sentence = " ".join(sentences[:2])
+    elif cleaned and cleaned != title:
+        sentence = cleaned
+
+    if sentence:
+        summary = f'This video centers on "{title or "the visible topic"}" and {playback}. The visible page text indicates: {sentence}'
+    elif tags:
+        summary = f'This video centers on "{title or "the visible topic"}" and {playback}. The visible metadata points to themes such as {", ".join(tags[:5])}. Because full subtitles or speech transcript were not exposed on the page, the summary is based on the title, visible tags, and screenshots sampled during playback.'
+    else:
+        summary = f'This video centers on "{title or "the visible topic"}" and {playback}. Because full subtitles or speech transcript were not exposed on the page, the summary is based on the title and screenshots sampled during playback.'
+    return summarize(summary, limit)
+
+
 def summarize_content(post, language="zh", detail="normal"):
     text = content_source(post)
     limit = {"minimal": 120, "normal": 260, "detailed": 420}[detail]
+    if post.get("media", {}).get("video_count"):
+        zh = video_summary_zh(post, limit)
+        en = video_summary_en(post, limit)
+        if language == "en":
+            return en
+        if language == "bilingual":
+            return f"{zh}\n  - EN: {en}"
+        return zh
     sentences = chinese_sentences(text)
     if sentences:
         summary = " ".join(sentences[:3])
@@ -346,7 +414,7 @@ def summarize_content(post, language="zh", detail="normal"):
     if language == "en":
         return f"{LABELS['en']['original_text']}: {summary}"
     if language == "bilingual":
-        return f"{summary}\n  - English note: Original visible text retained; use it as the source material for interpretation."
+        return f"{summary}\n  - EN: Original visible text retained as source material because no separate translation engine is available in the offline report script."
     return summary
 
 
