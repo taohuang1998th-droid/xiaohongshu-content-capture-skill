@@ -68,8 +68,18 @@ Then generate the brief:
 ```bash
 python3 scripts/daily_brief.py \
   --package xhs-captures/xhs-watch-package-2026-07-06.json \
-  --report-date 2026-07-06
+  --report-date 2026-07-06 \
+  --language 中文 \
+  --detail 普通
 ```
+
+Language options: `zh`/`中文`, `en`/`英文`, `bilingual`/`双语`.
+
+Detail options:
+
+- `minimal`/`极简`: core findings only.
+- `normal`/`普通`: summaries, analysis, metrics, and links.
+- `detailed`/`详细`: full extraction notes, sampled frame paths, and overall analysis.
 
 Do not create or present a CSV unless the user explicitly asks for it. Paste the Markdown report directly in the chat.
 

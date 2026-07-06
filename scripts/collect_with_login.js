@@ -627,7 +627,7 @@ async function main() {
 
   console.log("\nCollection complete.");
   console.log(`Collection package: ${packageFile}`);
-  console.log(`Next: run daily_brief.py --package "${packageFile}" and paste the Markdown report directly in chat.`);
+  console.log(`Next: run daily_brief.py --package "${packageFile}" --language 中文 --detail 普通 and paste the Markdown report directly in chat.`);
 
   rl.close();
   await browser.close();

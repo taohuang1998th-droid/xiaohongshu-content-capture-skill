@@ -7,6 +7,19 @@ description: Generate Markdown Xiaohongshu/REDnote content-capture and analysis 
 
 Use this skill to generate a daily traffic/content brief for a user-configured Xiaohongshu creator watchlist. The user-facing output is a Markdown document that must also be shown directly in the conversation.
 
+## Report Options
+
+When generating a brief, ask or infer two output preferences:
+
+- `--language zh` or `--language 中文`: Chinese brief.
+- `--language en` or `--language 英文`: English brief.
+- `--language bilingual` or `--language 双语`: Chinese-English bilingual brief.
+- `--detail minimal` or `--detail 极简`: shortest brief with core post summary and source links.
+- `--detail normal` or `--detail 普通`: default brief with summaries, analysis, metrics, and links.
+- `--detail detailed` or `--detail 详细`: full brief with extraction notes, sampled frame paths, and overall analysis.
+
+The report script localizes structure, labels, and built-in analysis heuristics. When the user requests English or bilingual output, translate or polish captured Chinese source summaries in the final chat-visible report instead of leaving them as raw Chinese unless preserving the original wording is important evidence.
+
 ## Watchlist Setup
 
 This skill ships with no default creators. On first use, ask the user for the Xiaohongshu creators they want to watch, or let `scripts/collect_with_login.js` prompt for them interactively.
@@ -83,7 +96,9 @@ Read `references/login-assisted-collection.md` before running this workflow.
 ```bash
 python3 scripts/daily_brief.py \
   --report-date 2026-07-06 \
-  --package xhs-captures/xhs-watch-package-2026-07-06.json
+  --package xhs-captures/xhs-watch-package-2026-07-06.json \
+  --language 中文 \
+  --detail 普通
 ```
 
 Omit `--out` when the user wants the report shown in the conversation. If `--out` is provided, still paste the important report content in chat.
@@ -105,6 +120,8 @@ For each watched creator, include:
 - content analysis for each post and an overall analysis section
 - likes, collects, comments for each yesterday post
 - original Xiaohongshu link for each post
+- the requested output language: Chinese, English, or bilingual
+- the requested output detail level: minimal, normal, or detailed
 
 If a creator has no matching post yesterday, show that explicitly.
 

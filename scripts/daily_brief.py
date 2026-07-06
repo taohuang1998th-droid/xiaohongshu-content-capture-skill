@@ -181,6 +181,125 @@ def fmt_delta(value):
     return "0"
 
 
+LABELS = {
+    "zh": {
+        "title": "小红书内容抓取简报",
+        "report_date": "报告日期",
+        "covered_date": "覆盖发布日期",
+        "watched": "关注博主",
+        "posts_loaded": "载入帖子数",
+        "followers_loaded": "粉丝快照数",
+        "caveat": "数据说明：本报告基于用户授权/手动提供的可见页面或导出数据生成。",
+        "follower_count": "粉丝数",
+        "delta": "较前日变化",
+        "posts_found": "昨日帖子数",
+        "no_posts": "输入数据中未发现该博主昨日发布的帖子。",
+        "summary": "内容概括",
+        "analysis": "内容分析",
+        "likes": "点赞",
+        "collects": "收藏",
+        "comments": "评论",
+        "link": "原文链接",
+        "extraction": "采集说明",
+        "frames": "视频/图片抽帧",
+        "overall": "整体分析",
+        "detailed_posts": "已分析详情帖子数",
+        "videos": "检测到可播放视频的帖子数",
+        "pattern": "模式：优先选择能让读者立刻理解“这和我有什么关系”的选题钩子。",
+        "watch": "注意：如果页面只暴露卡片级数据，互动指标应视为方向性参考，直到详情页计数可见。",
+        "no_body": "输入中没有可用于概括的正文或详情文本。",
+        "original_text": "原始可见文本",
+        "detail_only": "仅采集到详情文本。",
+    },
+    "en": {
+        "title": "Xiaohongshu Content Capture Brief",
+        "report_date": "Report date",
+        "covered_date": "Covered publishing date",
+        "watched": "Watched creators",
+        "posts_loaded": "Posts loaded",
+        "followers_loaded": "Follower snapshots loaded",
+        "caveat": "Data caveat: this report is generated from authorized visible pages or user-provided exports.",
+        "follower_count": "Follower count",
+        "delta": "Change vs previous day",
+        "posts_found": "Yesterday posts found",
+        "no_posts": "No yesterday posts from this creator were present in the input data.",
+        "summary": "Content summary",
+        "analysis": "Content analysis",
+        "likes": "Likes",
+        "collects": "Collects",
+        "comments": "Comments",
+        "link": "Original link",
+        "extraction": "Extraction note",
+        "frames": "Sampled video/image frames",
+        "overall": "Overall Analysis",
+        "detailed_posts": "Detailed posts analyzed",
+        "videos": "Posts with playable video detected",
+        "pattern": "Pattern: prioritize hooks that quickly show why the topic matters to the reader.",
+        "watch": "Watch point: if only card-level data is visible, treat engagement metrics as directional until detail-page counters are visible.",
+        "no_body": "No body or detail text was available for summarization.",
+        "original_text": "Original visible text",
+        "detail_only": "Detail text only.",
+    },
+}
+
+
+def label(key, language):
+    if language == "bilingual":
+        zh = LABELS["zh"][key]
+        en = LABELS["en"][key]
+        return f"{zh} / {en}"
+    return LABELS[language][key]
+
+
+def normalize_language(value):
+    text = str(value or "zh").strip().lower()
+    aliases = {
+        "zh": "zh",
+        "cn": "zh",
+        "chinese": "zh",
+        "中文": "zh",
+        "汉语": "zh",
+        "en": "en",
+        "english": "en",
+        "英文": "en",
+        "英语": "en",
+        "bilingual": "bilingual",
+        "bi": "bilingual",
+        "dual": "bilingual",
+        "双语": "bilingual",
+        "中英": "bilingual",
+        "中英双语": "bilingual",
+    }
+    if text not in aliases:
+        raise SystemExit("Unsupported --language. Use zh/en/bilingual or 中文/英文/双语.")
+    return aliases[text]
+
+
+def normalize_detail(value):
+    text = str(value or "normal").strip().lower()
+    aliases = {
+        "minimal": "minimal",
+        "mini": "minimal",
+        "short": "minimal",
+        "brief": "minimal",
+        "极简": "minimal",
+        "极简版": "minimal",
+        "normal": "normal",
+        "standard": "normal",
+        "普通": "normal",
+        "普通版": "normal",
+        "detailed": "detailed",
+        "detail": "detailed",
+        "full": "detailed",
+        "long": "detailed",
+        "详细": "detailed",
+        "详细版": "detailed",
+    }
+    if text not in aliases:
+        raise SystemExit("Unsupported --detail. Use minimal/normal/detailed or 极简/普通/详细.")
+    return aliases[text]
+
+
 def metric_score(post):
     return sum(post[field] or 0 for field in ("likes", "collects", "comments"))
 
@@ -188,7 +307,7 @@ def metric_score(post):
 def summarize(text, limit=180):
     clean = re.sub(r"\s+", " ", str(text or "")).strip()
     if not clean:
-        return "No content summary/body was available in the input."
+        return ""
     return clean if len(clean) <= limit else clean[: limit - 1] + "..."
 
 
@@ -207,16 +326,25 @@ def chinese_sentences(text):
     return [part.strip() for part in parts if len(part.strip()) >= 8]
 
 
-def summarize_content(post):
+def summarize_content(post, language="zh", detail="normal"):
     text = content_source(post)
+    limit = {"minimal": 120, "normal": 260, "detailed": 420}[detail]
     sentences = chinese_sentences(text)
     if sentences:
         summary = " ".join(sentences[:3])
-        return summarize(summary, 260)
-    return summarize(text, 260)
+        summary = summarize(summary, limit)
+    else:
+        summary = summarize(text, limit)
+    if not summary:
+        return label("no_body", "en" if language == "en" else "zh")
+    if language == "en":
+        return f"{LABELS['en']['original_text']}: {summary}"
+    if language == "bilingual":
+        return f"{summary}\n  - English note: Original visible text retained; use it as the source material for interpretation."
+    return summary
 
 
-def analyze_post(post):
+def analyze_post_zh(post):
     text = content_source(post)
     title = post.get("title") or ""
     observations = []
@@ -233,17 +361,42 @@ def analyze_post(post):
     return " ".join(observations)
 
 
-def render_doc_analysis(posts, creators):
+def analyze_post_en(post):
+    text = content_source(post)
+    title = post.get("title") or ""
+    observations = []
+    if re.search(r"AI|Anthropic|模型|估值|科技|创业|效率", f"{title} {text}", re.I):
+        observations.append("This is a knowledge/trend explainer; the hook connects a hot event to practical relevance for ordinary readers.")
+    if re.search(r"小猫|跳|可爱|日常|情绪|生活|女性", f"{title} {text}"):
+        observations.append("The post leans on light emotion and visual memorability; the title is concrete and easy to react to.")
+    if re.search(r"成功|女人|背后|职场|成长|关系", f"{title} {text}"):
+        observations.append("The topic uses identity and value framing, which can invite recognition, debate, and comment-driven interaction.")
+    if post.get("media", {}).get("video_count"):
+        observations.append("A playable video was detected; analysis is based on visible page text and sampled frames, not audio transcription unless captions are visible.")
+    if not observations:
+        observations.append("Assess the post through hook clarity, information density, visual evidence, and comment incentives.")
+    return " ".join(observations)
+
+
+def analyze_post(post, language="zh"):
+    if language == "en":
+        return analyze_post_en(post)
+    if language == "bilingual":
+        return f"{analyze_post_zh(post)}\n  - EN: {analyze_post_en(post)}"
+    return analyze_post_zh(post)
+
+
+def render_doc_analysis(posts, creators, language):
     all_posts = [post for post in posts if post["creator"] in creators]
     with_posts = [post for post in all_posts if post.get("title") or post.get("body") or post.get("detail_text")]
     video_count = sum(1 for post in all_posts if post.get("media", {}).get("video_count"))
     lines = [
-        "## Overall Analysis",
+        f"## {label('overall', language)}",
         "",
-        f"- Detailed posts analyzed: {len(with_posts)}",
-        f"- Posts with playable video detected: {video_count}",
-        "- Pattern: prioritize hooks that make the reader immediately know why the topic matters to them.",
-        "- Watch point: if a post only exposes card-level data, treat metrics as directional instead of exact until detail-page counters are visible.",
+        f"- {label('detailed_posts', language)}: {len(with_posts)}",
+        f"- {label('videos', language)}: {video_count}",
+        f"- {label('pattern', language)}",
+        f"- {label('watch', language)}",
         "",
     ]
     return lines
@@ -273,7 +426,7 @@ def latest_count_for(creator, target_day, lookup):
     return snapshots[max(earlier)]
 
 
-def render_report(posts, followers, creators, report_day, tz):
+def render_report(posts, followers, creators, report_day, tz, language="zh", detail="normal"):
     target_day = report_day - timedelta(days=1)
     prior_snapshot_day = report_day - timedelta(days=1)
     lookup = follower_lookup(posts, followers)
@@ -283,16 +436,19 @@ def render_report(posts, followers, creators, report_day, tz):
             posts_by_creator[post["creator"]].append(post)
 
     lines = [
-        "# Xiaohongshu Content Capture Brief",
+        f"# {label('title', language)}",
         "",
-        f"- Report date: {report_day.isoformat()} ({tz.key})",
-        f"- Covered publishing date: {target_day.isoformat()}",
-        f"- Watched creators: {', '.join(creators)}",
-        f"- Posts loaded: {len(posts)}",
-        f"- Follower snapshots loaded: {len(followers)}",
-        "- Data caveat: this report reflects the authorized/manual export supplied to the skill.",
-        "",
+        f"- {label('report_date', language)}: {report_day.isoformat()} ({tz.key})",
+        f"- {label('covered_date', language)}: {target_day.isoformat()}",
+        f"- {label('watched', language)}: {', '.join(creators)}",
     ]
+    if detail != "minimal":
+        lines += [
+            f"- {label('posts_loaded', language)}: {len(posts)}",
+            f"- {label('followers_loaded', language)}: {len(followers)}",
+            f"- {label('caveat', language)}",
+        ]
+    lines += [""]
 
     for creator in creators:
         current = latest_count_for(creator, report_day, lookup) or latest_count_for(creator, target_day, lookup)
@@ -303,35 +459,49 @@ def render_report(posts, followers, creators, report_day, tz):
         lines += [
             f"## {creator}",
             "",
-            f"- Follower count: {fmt_count(current) if current else 'unknown'}",
-            f"- Change vs previous day: {fmt_delta(delta)}",
-            f"- Yesterday posts found: {len(creator_posts)}",
+            f"- {label('follower_count', language)}: {fmt_count(current) if current else 'unknown'}",
+            f"- {label('delta', language)}: {fmt_delta(delta)}",
+            f"- {label('posts_found', language)}: {len(creator_posts)}",
             "",
         ]
 
         if not creator_posts:
-            lines += ["No yesterday posts from this creator were present in the input export.", ""]
+            lines += [label("no_posts", language), ""]
             continue
 
         for idx, post in enumerate(creator_posts, 1):
             frame_lines = []
-            if post.get("video_frame_paths"):
-                frame_lines = ["- Video frames sampled:", *[f"  - {path}" for path in post["video_frame_paths"][:3]]]
+            if detail == "detailed" and post.get("video_frame_paths"):
+                frame_lines = [f"- {label('frames', language)}:", *[f"  - {path}" for path in post["video_frame_paths"][:3]]]
             lines += [
                 f"### {idx}. {(post['title'] or '(untitled)').replace(' - 小红书', '')}",
                 "",
-                f"- Content summary: {summarize_content(post)}",
-                f"- Content analysis: {analyze_post(post)}",
-                f"- Likes: {fmt_count(post['likes'])}",
-                f"- Collects: {fmt_count(post['collects'])}",
-                f"- Comments: {fmt_count(post['comments'])}",
-                f"- Original link: {post['url'] or 'No URL provided'}",
-                f"- Extraction note: {post.get('extraction_note') or 'Detail text only.'}",
-                *frame_lines,
-                "",
             ]
+            if detail == "minimal":
+                lines += [
+                    f"- {label('summary', language)}: {summarize_content(post, language, detail)}",
+                    f"- {label('link', language)}: {post['url'] or 'No URL provided'}",
+                    "",
+                ]
+                continue
 
-    lines += render_doc_analysis(posts, creators)
+            lines += [
+                f"- {label('summary', language)}: {summarize_content(post, language, detail)}",
+                f"- {label('analysis', language)}: {analyze_post(post, language)}",
+                f"- {label('likes', language)}: {fmt_count(post['likes'])}",
+                f"- {label('collects', language)}: {fmt_count(post['collects'])}",
+                f"- {label('comments', language)}: {fmt_count(post['comments'])}",
+                f"- {label('link', language)}: {post['url'] or 'No URL provided'}",
+            ]
+            if detail == "detailed":
+                lines += [
+                    f"- {label('extraction', language)}: {post.get('extraction_note') or label('detail_only', language)}",
+                    *frame_lines,
+                ]
+            lines += [""]
+
+    if detail != "minimal":
+        lines += render_doc_analysis(posts, creators, language)
     return "\n".join(lines)
 
 
@@ -345,8 +515,12 @@ def main():
     parser.add_argument("--followers", type=Path, help="Optional follower snapshots export.")
     parser.add_argument("--creators-file", type=Path, default=default_creators, help="Watchlist file, one creator per line.")
     parser.add_argument("--report-date", help="Report date in YYYY-MM-DD. Defaults to current date in Asia/Shanghai.")
+    parser.add_argument("--language", default="zh", help="Brief language: zh/en/bilingual, or 中文/英文/双语. Default: zh.")
+    parser.add_argument("--detail", default="normal", help="Brief detail level: minimal/normal/detailed, or 极简/普通/详细. Default: normal.")
     parser.add_argument("--out", type=Path, help="Markdown output path. Defaults to stdout.")
     args = parser.parse_args()
+    args.language = normalize_language(args.language)
+    args.detail = normalize_detail(args.detail)
 
     tz = ZoneInfo("Asia/Shanghai")
     report_day = date.fromisoformat(args.report_date) if args.report_date else datetime.now(tz).date()
@@ -370,7 +544,7 @@ def main():
         posts = [normalize_post(row, tz) for row in load_rows(args.posts)]
         followers = [normalize_follower(row, tz) for row in load_rows(args.followers)] if args.followers else []
 
-    report = render_report(posts, followers, creators, report_day, tz)
+    report = render_report(posts, followers, creators, report_day, tz, args.language, args.detail)
     if args.out:
         args.out.write_text(report, encoding="utf-8")
     else:
