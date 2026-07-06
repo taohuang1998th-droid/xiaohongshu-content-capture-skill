@@ -1,0 +1,88 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Xiaohongshu Content Capture</title>
+    <link rel="stylesheet" href="./styles.css">
+  </head>
+  <body>
+    <main class="shell">
+      <section class="controls">
+        <header>
+          <h1>小红书内容简报</h1>
+          <p>使用自己的可见登录页面采集关注博主昨日内容。</p>
+        </header>
+
+        <label class="field">
+          <span>博主名单</span>
+          <textarea id="creators" rows="8" placeholder="@小Lin说&#10;@孟羽童Morita"></textarea>
+        </label>
+
+        <div class="grid">
+          <label class="field">
+            <span>报告日期</span>
+            <input id="reportDate" type="date">
+          </label>
+          <label class="field">
+            <span>每位博主最多打开</span>
+            <input id="detailLimit" type="number" min="1" max="50" value="6">
+          </label>
+        </div>
+
+        <div class="option-block">
+          <span>语言</span>
+          <div class="segmented" role="group" aria-label="语言">
+            <button class="selected" data-language="中文">中文</button>
+            <button data-language="英文">英文</button>
+            <button data-language="双语">双语</button>
+          </div>
+        </div>
+
+        <div class="option-block">
+          <span>详略</span>
+          <div class="segmented" role="group" aria-label="详略">
+            <button data-detail="极简">极简</button>
+            <button class="selected" data-detail="普通">普通</button>
+            <button data-detail="详细">详细</button>
+          </div>
+        </div>
+
+        <label class="field">
+          <span>视频播放秒数</span>
+          <input id="playSeconds" type="range" min="0" max="30" step="1" value="8">
+          <output id="playSecondsValue">8 秒</output>
+        </label>
+
+        <label class="field path-field">
+          <span>输出目录</span>
+          <div>
+            <input id="outputDir" type="text" readonly>
+            <button id="chooseDir" type="button" title="选择输出目录">选择</button>
+          </div>
+        </label>
+
+        <div class="actions">
+          <button id="start" class="primary" type="button">开始采集</button>
+          <button id="cancel" type="button" disabled>停止</button>
+        </div>
+
+        <p id="status" class="status">准备就绪</p>
+      </section>
+
+      <section class="output">
+        <div class="tabs">
+          <button class="selected" data-tab="report">简报</button>
+          <button data-tab="log">日志</button>
+        </div>
+        <article id="report" class="panel markdown empty">采集完成后，简报会显示在这里。</article>
+        <pre id="log" class="panel log hidden"></pre>
+        <div class="footer-actions">
+          <button id="openRunDir" type="button" disabled>打开运行目录</button>
+          <button id="openReport" type="button" disabled>打开报告</button>
+        </div>
+      </section>
+    </main>
+    <script src="./renderer.js"></script>
+  </body>
+</html>

@@ -39,3 +39,16 @@ python3 scripts/daily_brief.py \
 ## Safety Boundary
 
 This skill reads only pages the user can view in a visible browser session. It must not ask for passwords, SMS codes, cookies, or session tokens, and it must not bypass CAPTCHA, risk checks, rate limits, or private APIs.
+
+## Desktop App
+
+A first desktop wrapper lives in `desktop-app/`.
+
+```bash
+cd desktop-app
+npm install
+npm run install-browsers
+npm start
+```
+
+This app is intended for users who do not use Codex. It provides a local UI for creator watchlist entry, language/detail selection, visible-browser collection, logs, and Markdown report preview.
