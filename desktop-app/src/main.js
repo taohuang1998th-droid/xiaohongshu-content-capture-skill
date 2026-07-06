@@ -4,9 +4,16 @@ const fs = require("fs");
 const { spawn } = require("child_process");
 
 const repoRoot = path.resolve(__dirname, "..", "..");
-const desktopRoot = path.resolve(__dirname, "..");
-const desktopNodeModules = path.join(desktopRoot, "node_modules");
-const skillRoot = path.join(repoRoot, "skills", "xiaohongshu-content-capture");
+const desktopRoot = app.isPackaged ? process.resourcesPath : path.resolve(__dirname, "..");
+const desktopNodeModules = app.isPackaged
+  ? path.join(process.resourcesPath, "app.asar", "node_modules")
+  : path.join(desktopRoot, "node_modules");
+const skillRoot = app.isPackaged
+  ? path.join(process.resourcesPath, "skill")
+  : path.join(repoRoot, "skills", "xiaohongshu-content-capture");
+const bundledPlaywrightBrowsers = app.isPackaged
+  ? path.join(process.resourcesPath, "ms-playwright")
+  : "";
 const collectorScript = path.join(skillRoot, "scripts", "collect_with_login.js");
 const reportScript = path.join(skillRoot, "scripts", "daily_brief.py");
 
@@ -172,6 +179,7 @@ async function startRun(rawConfig) {
       env: {
         ELECTRON_RUN_AS_NODE: "1",
         NODE_PATH: [desktopNodeModules, process.env.NODE_PATH || ""].filter(Boolean).join(path.delimiter),
+        ...(bundledPlaywrightBrowsers ? { PLAYWRIGHT_BROWSERS_PATH: bundledPlaywrightBrowsers } : {}),
       },
     });
 

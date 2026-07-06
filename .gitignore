@@ -1,6 +1,8 @@
 xhs-captures/
 work/
 node_modules/
+desktop-app/dist/
+desktop-app/build-resources/ms-playwright/
 .DS_Store
 __pycache__/
 *.pyc

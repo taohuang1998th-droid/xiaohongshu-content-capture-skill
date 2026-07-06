@@ -52,3 +52,18 @@ npm start
 ```
 
 This app is intended for users who do not use Codex. It provides a local UI for creator watchlist entry, language/detail selection, visible-browser collection, logs, and Markdown report preview.
+
+To build a macOS installer image:
+
+```bash
+cd desktop-app
+npm run build:mac
+```
+
+The `.dmg` output appears in `desktop-app/dist/`.
+
+The current local build produces an Apple Silicon DMG such as:
+
+```text
+desktop-app/dist/小红书内容简报-0.1.0-arm64.dmg
+```
