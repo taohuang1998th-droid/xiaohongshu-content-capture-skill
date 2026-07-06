@@ -400,9 +400,12 @@ function noteIdFromUrl(url) {
   return match ? match[1] : String(url || "");
 }
 
-function isYesterdayCandidate(post) {
+function isYesterdayCandidate(post, creator) {
   const text = `${post.title || ""} ${post.body || ""}`;
-  return /昨天|1天前/.test(text) && /\/(?:explore|search_result)\//.test(post.url || "");
+  const creatorName = String(creator || "").replace(/^@/, "");
+  return /昨天|1天前/.test(text)
+    && /\/(?:explore|search_result)\//.test(post.url || "")
+    && (!creatorName || text.includes(creatorName));
 }
 
 function uniquePosts(posts) {
@@ -598,7 +601,7 @@ async function main() {
     }
 
     const extracted = await extractVisiblePage(page, creator, postDate, args.reportDate);
-    const candidates = uniquePosts(extracted.posts.filter(isYesterdayCandidate)).slice(0, args.detailLimit);
+    const candidates = uniquePosts(extracted.posts.filter((post) => isYesterdayCandidate(post, creator))).slice(0, args.detailLimit);
     const profileUrl = page.url();
     const detailed = [];
     console.log(`Found ${candidates.length} likely yesterday post(s). Opening detail pages...`);
