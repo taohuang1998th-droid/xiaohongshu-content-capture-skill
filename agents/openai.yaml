@@ -1,0 +1,4 @@
+interface:
+  display_name: "Xiaohongshu Content Capture"
+  short_description: "Capture and analyze watched Xiaohongshu creator content"
+  default_prompt: "Use $xiaohongshu-content-capture to help me configure my Xiaohongshu creator watchlist, capture yesterday's posts, and show a summarized analysis brief directly in chat."
