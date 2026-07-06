@@ -143,6 +143,8 @@ def normalize_post(row, tz):
     record["extraction_note"] = str(record["extraction_note"]).strip()
     record["video_frame_paths"] = row.get("video_frame_paths", []) if isinstance(row, dict) else []
     record["media"] = row.get("media", {}) if isinstance(row, dict) else {}
+    record["metric_source"] = str(row.get("metric_source", "")).strip() if isinstance(row, dict) else ""
+    record["warnings"] = row.get("warnings", []) if isinstance(row, dict) and isinstance(row.get("warnings"), list) else []
     for field in ("likes", "collects", "comments"):
         record[field] = parse_count(record[field], unknown_as_none=True)
     for field in ("follower_count", "previous_follower_count"):
@@ -202,6 +204,8 @@ LABELS = {
         "link": "原文链接",
         "extraction": "采集说明",
         "frames": "视频/图片抽帧",
+        "metric_source": "互动指标来源",
+        "warnings": "采集警告",
         "overall": "整体分析",
         "detailed_posts": "已分析详情帖子数",
         "videos": "检测到可播放视频的帖子数",
@@ -231,6 +235,8 @@ LABELS = {
         "link": "Original link",
         "extraction": "Extraction note",
         "frames": "Sampled video/image frames",
+        "metric_source": "Engagement metric source",
+        "warnings": "Collection warnings",
         "overall": "Overall Analysis",
         "detailed_posts": "Detailed posts analyzed",
         "videos": "Posts with playable video detected",
@@ -494,8 +500,13 @@ def render_report(posts, followers, creators, report_day, tz, language="zh", det
                 f"- {label('link', language)}: {post['url'] or 'No URL provided'}",
             ]
             if detail == "detailed":
+                warning_lines = []
+                if post.get("warnings"):
+                    warning_lines = [f"- {label('warnings', language)}:", *[f"  - {item}" for item in post["warnings"]]]
                 lines += [
                     f"- {label('extraction', language)}: {post.get('extraction_note') or label('detail_only', language)}",
+                    f"- {label('metric_source', language)}: {post.get('metric_source') or 'unknown'}",
+                    *warning_lines,
                     *frame_lines,
                 ]
             lines += [""]

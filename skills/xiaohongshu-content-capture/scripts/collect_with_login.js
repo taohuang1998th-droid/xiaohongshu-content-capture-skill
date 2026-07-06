@@ -18,21 +18,41 @@ function parseArgs(argv) {
   for (let i = 2; i < argv.length; i += 1) {
     const arg = argv[i];
     const next = argv[i + 1];
-    if (arg === "--creators-file") args.creatorsFile = path.resolve(next), i += 1;
-    else if (arg === "--report-date") args.reportDate = next, i += 1;
-    else if (arg === "--out-dir") args.outDir = path.resolve(next), i += 1;
-    else if (arg === "--profile-dir") args.profileDir = path.resolve(next), i += 1;
+    if (arg === "--creators-file") args.creatorsFile = path.resolve(requireValue(arg, next)), i += 1;
+    else if (arg === "--report-date") args.reportDate = requireValue(arg, next), i += 1;
+    else if (arg === "--out-dir") args.outDir = path.resolve(requireValue(arg, next)), i += 1;
+    else if (arg === "--profile-dir") args.profileDir = path.resolve(requireValue(arg, next)), i += 1;
     else if (arg === "--headless") args.headless = true;
     else if (arg === "--manual-fallback") args.manualFallback = true;
     else if (arg === "--no-manual-fallback") args.manualFallback = false;
-    else if (arg === "--detail-limit") args.detailLimit = Number(next), i += 1;
-    else if (arg === "--play-seconds") args.playSeconds = Number(next), i += 1;
+    else if (arg === "--detail-limit") args.detailLimit = Number(requireValue(arg, next)), i += 1;
+    else if (arg === "--play-seconds") args.playSeconds = Number(requireValue(arg, next)), i += 1;
     else if (arg === "--help" || arg === "-h") {
       printHelp();
       process.exit(0);
     }
   }
+  validateArgs(args);
   return args;
+}
+
+function requireValue(arg, value) {
+  if (!value || String(value).startsWith("--")) {
+    throw new Error(`${arg} requires a value.`);
+  }
+  return value;
+}
+
+function validateArgs(args) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(args.reportDate)) {
+    throw new Error("--report-date must use YYYY-MM-DD.");
+  }
+  if (!Number.isInteger(args.detailLimit) || args.detailLimit < 1 || args.detailLimit > 50) {
+    throw new Error("--detail-limit must be an integer from 1 to 50.");
+  }
+  if (!Number.isFinite(args.playSeconds) || args.playSeconds < 0 || args.playSeconds > 120) {
+    throw new Error("--play-seconds must be a number from 0 to 120.");
+  }
 }
 
 function printHelp() {
@@ -113,30 +133,23 @@ async function ensureCreators(args, rl) {
 }
 
 function createRl() {
-  return readline.createInterface({ input: process.stdin, output: process.stdout });
+  const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+  rl.closed = false;
+  rl.on("close", () => {
+    rl.closed = true;
+  });
+  return rl;
 }
 
-function ask(rl, question) {
-  return new Promise((resolve) => rl.question(question, (answer) => resolve(answer.trim())));
-}
-
-function csvEscape(value) {
-  const text = String(value == null ? "" : value);
-  return /[",\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
-}
-
-function toCsv(rows, headers) {
-  return [headers.join(",")]
-    .concat(rows.map((row) => headers.map((key) => csvEscape(row[key])).join(",")))
-    .join("\n");
-}
-
-function appendCsv(file, rows, headers) {
-  if (!rows.length) return;
-  fs.mkdirSync(path.dirname(file), { recursive: true });
-  const exists = fs.existsSync(file);
-  const body = toCsv(rows, headers).split("\n").slice(exists ? 1 : 0).join("\n");
-  fs.appendFileSync(file, `${body}\n`, "utf8");
+function ask(rl, question, fallback = "") {
+  if (!process.stdin.isTTY || rl.closed) return Promise.resolve(fallback);
+  return new Promise((resolve) => {
+    try {
+      rl.question(question, (answer) => resolve(answer.trim()));
+    } catch {
+      resolve(fallback);
+    }
+  });
 }
 
 function writeJson(file, data) {
@@ -507,18 +520,193 @@ async function extractDetailPage(page, creator, post, args, postDate, index, pro
   const detail = await page.evaluate(() => {
     const clean = (value) => String(value || "").replace(/\u200b/g, "").replace(/\s+/g, " ").trim();
     const bodyText = clean(document.body ? document.body.innerText : "");
-    const meta = {};
-    const metaText = bodyText.slice(0, 30000);
-    const pick = (patterns) => {
-      for (const pattern of patterns) {
-        const match = metaText.match(pattern);
+    const isVisible = (el) => {
+      if (!el || !(el instanceof Element)) return false;
+      const rect = el.getBoundingClientRect();
+      const style = window.getComputedStyle(el);
+      return rect.width > 4
+        && rect.height > 4
+        && style.display !== "none"
+        && style.visibility !== "hidden"
+        && rect.bottom >= 0
+        && rect.right >= 0
+        && rect.top <= window.innerHeight
+        && rect.left <= window.innerWidth;
+    };
+    const parseCountToken = (text) => {
+      const normalized = clean(text).replace(/,/g, "");
+      if (!normalized || /^(赞|点赞|收藏|评论|分享|回复|说点什么|展开|收起)$/.test(normalized)) return "";
+      const match = normalized.match(/^(\d+(?:\.\d+)?)(万|w|W|k|K)?$/);
+      return match ? `${match[1]}${match[2] || ""}` : "";
+    };
+    const parseCountInText = (text) => {
+      const normalized = clean(text).replace(/,/g, "");
+      const exact = parseCountToken(normalized);
+      if (exact) return exact;
+      const match = normalized.match(/(?:^|[^\d.])(\d+(?:\.\d+)?)(万|w|W|k|K)?(?:$|[^\d.])/);
+      return match ? `${match[1]}${match[2] || ""}` : "";
+    };
+    const extractCountSequence = (text) => {
+      const normalized = clean(text).replace(/,/g, "");
+      return Array.from(normalized.matchAll(/(^|[^\d.])(\d+(?:\.\d+)?)(万|w|W|k|K)?(?=$|[^\d.])/g))
+        .map((match) => `${match[2]}${match[3] || ""}`);
+    };
+    const pickLabeled = (text, label) => {
+      const patterns = {
+        likes: [/(?:^|\s)(?:赞|点赞|like)[^\d万wkWK]{0,8}(\d+(?:\.\d+)?)(万|w|W|k|K)?/i],
+        collects: [/(?:^|\s)(?:收藏|藏|collect|favorite)[^\d万wkWK]{0,8}(\d+(?:\.\d+)?)(万|w|W|k|K)?/i],
+        comments: [/(?:^|\s)(?:评论|评|comment)[^\d万wkWK]{0,8}(\d+(?:\.\d+)?)(万|w|W|k|K)?/i],
+      };
+      for (const pattern of patterns[label]) {
+        const match = clean(text).match(pattern);
         if (match) return `${match[1]}${match[2] || ""}`;
       }
       return "";
     };
-    meta.likes = pick([/(?:赞|点赞)[^\d万wk千百十]{0,8}([\d,.]+)\s*([万wk千百十]?)/i]);
-    meta.collects = pick([/(?:收藏|藏)[^\d万wk千百十]{0,8}([\d,.]+)\s*([万wk千百十]?)/i]);
-    meta.comments = pick([/(?:评论|评)[^\d万wk千百十]{0,8}([\d,.]+)\s*([万wk千百十]?)/i]);
+    const extractMetrics = () => {
+      const elements = Array.from(document.querySelectorAll("button, a, span, div")).filter(isVisible);
+      const records = elements.map((el) => {
+        const rect = el.getBoundingClientRect();
+        return {
+          text: clean(el.innerText || el.textContent),
+          aria: clean(el.getAttribute("aria-label") || ""),
+          title: clean(el.getAttribute("title") || ""),
+          cls: String(el.className || ""),
+          x: rect.x,
+          y: rect.y,
+          width: rect.width,
+          height: rect.height,
+        };
+      });
+      const inActionArea = (item) =>
+        item.x > window.innerWidth * 0.45
+        && item.y > window.innerHeight - 220
+        && item.y < window.innerHeight
+        && item.width < window.innerWidth * 0.70
+        && !/ICP备|营业执照|公网安备|许可证/.test(item.text);
+      const actionZone = records.filter((item) =>
+        inActionArea(item)
+      );
+      const bottomSequences = actionZone
+        .map((item) => ({ ...item, sequence: extractCountSequence(`${item.text} ${item.aria} ${item.title}`) }))
+        .filter((item) =>
+          item.sequence.length >= 3
+          && item.x > window.innerWidth * 0.58
+          && item.y > window.innerHeight - 120
+          && item.text.length < 120
+          && !/(回复|展开|条评论|分钟前|小时前|昨天|今天|北京|上海|美国|20\d{2}[-/.年]\d{1,2})/.test(item.text)
+        )
+        .sort((a, b) => (b.y - a.y) || (b.width - a.width));
+      if (bottomSequences.length) {
+        const item = bottomSequences[0];
+        const sequence = item.sequence.slice(-3);
+        return {
+          likes: sequence[0],
+          collects: sequence[1],
+          comments: sequence[2],
+          metric_source: "detail_action_bar_text_sequence",
+          metric_debug: [{
+            text: item.text,
+            cls: item.cls.slice(0, 80),
+            sequence,
+            x: Math.round(item.x),
+            y: Math.round(item.y),
+          }],
+        };
+      }
+      const findSemanticMetric = (key) => {
+        const classPatterns = {
+          likes: /(^|[-_\s])(like|likes|liked|like-wrapper)([-_\s]|$)/i,
+          collects: /(^|[-_\s])(collect|collects|collected|favorite|fav|star|collect-wrapper)([-_\s]|$)/i,
+          comments: /(^|[-_\s])(comment|comments|chat|reply|chat-wrapper|comment-wrapper)([-_\s]|$)/i,
+        };
+        const textPatterns = {
+          likes: /(赞|点赞|like)/i,
+          collects: /(收藏|collect|favorite|fav|star)/i,
+          comments: /(评论|留言|comment|chat|reply)/i,
+        };
+        const candidates = records
+          .filter((item) => inActionArea(item))
+          .map((item) => {
+            const haystack = `${item.cls} ${item.aria} ${item.title} ${item.text}`;
+            const semantic = classPatterns[key].test(item.cls) || textPatterns[key].test(haystack);
+            const value = parseCountInText(`${item.text} ${item.aria} ${item.title}`);
+            return { ...item, semantic, value };
+          })
+          .filter((item) =>
+            item.semantic
+            && item.value
+            && item.height < 90
+            && item.text.length < 120
+            && !/(parent-comment|comment-item|comments-container)/i.test(item.cls)
+            && !/(回复|展开|条评论|分钟前|小时前|昨天|今天|北京|上海|美国)/.test(item.text)
+          )
+          .sort((a, b) => (b.y - a.y) || (b.x - a.x) || (a.width - b.width));
+        return candidates[0] || null;
+      };
+      const semanticMetrics = {
+        likes: findSemanticMetric("likes"),
+        collects: findSemanticMetric("collects"),
+        comments: findSemanticMetric("comments"),
+      };
+      if (semanticMetrics.likes && semanticMetrics.collects && semanticMetrics.comments) {
+        return {
+          likes: semanticMetrics.likes.value,
+          collects: semanticMetrics.collects.value,
+          comments: semanticMetrics.comments.value,
+          metric_source: "detail_action_bar_semantic",
+          metric_debug: Object.entries(semanticMetrics).map(([key, item]) => ({
+            key,
+            text: item.text,
+            cls: item.cls.slice(0, 80),
+            x: Math.round(item.x),
+            y: Math.round(item.y),
+          })),
+        };
+      }
+      const numericNodes = actionZone
+        .map((item) => ({ ...item, value: parseCountToken(item.text || item.aria || item.title) }))
+        .filter((item) => item.value)
+        .sort((a, b) => (a.y - b.y) || (a.x - b.x));
+      const compactNumericNodes = [];
+      for (const item of numericNodes) {
+        const duplicate = compactNumericNodes.some((seen) =>
+          seen.value === item.value && Math.abs(seen.x - item.x) < 18 && Math.abs(seen.y - item.y) < 18
+        );
+        if (!duplicate) compactNumericNodes.push(item);
+      }
+      if (compactNumericNodes.length >= 3) {
+        const rightmostRow = compactNumericNodes
+          .slice()
+          .sort((a, b) => b.y - a.y)
+          .filter((item, _, arr) => Math.abs(item.y - arr[0].y) < 80)
+          .sort((a, b) => a.x - b.x)
+          .slice(-3);
+        if (rightmostRow.length === 3) {
+          return {
+            likes: semanticMetrics.likes?.value || rightmostRow[0].value,
+            collects: semanticMetrics.collects?.value || rightmostRow[1].value,
+            comments: semanticMetrics.comments?.value || rightmostRow[2].value,
+            metric_source: "detail_action_bar",
+            metric_debug: [
+              ...Object.entries(semanticMetrics)
+                .filter(([, item]) => item)
+                .map(([key, item]) => ({ key, text: item.text, cls: item.cls.slice(0, 80), x: Math.round(item.x), y: Math.round(item.y) })),
+              ...rightmostRow.map((item) => ({ text: item.text, x: Math.round(item.x), y: Math.round(item.y) })),
+            ],
+          };
+        }
+      }
+      const actionText = actionZone.map((item) => `${item.text} ${item.aria} ${item.title}`).join(" ");
+      return {
+        likes: pickLabeled(actionText, "likes"),
+        collects: pickLabeled(actionText, "collects"),
+        comments: pickLabeled(actionText, "comments"),
+        metric_source: "detail_action_zone_labeled_fallback",
+        metric_debug: actionZone.slice(-12).map((item) => ({ text: item.text.slice(0, 60), x: Math.round(item.x), y: Math.round(item.y) })),
+      };
+    };
+    const meta = extractMetrics();
     const title =
       clean(document.querySelector("meta[property='og:title']")?.content) ||
       clean(document.querySelector("h1")?.innerText) ||
@@ -531,7 +719,7 @@ async function extractDetailPage(page, creator, post, args, postDate, index, pro
       .filter(Boolean)
       .slice(0, 8);
     return { title, description, visible_text: bodyText.slice(0, 12000), metrics: meta, images };
-  }).catch(() => ({ title: "", description: "", visible_text: "", metrics: {}, images: [] }));
+  }).catch((error) => ({ title: "", description: "", visible_text: "", metrics: {}, images: [], extraction_error: String(error && error.message ? error.message : error) }));
 
   const missingPage = isMissingPage(detail);
   return {
@@ -543,9 +731,15 @@ async function extractDetailPage(page, creator, post, args, postDate, index, pro
     likes: missingPage ? post.likes : (detail.metrics.likes || post.likes),
     collects: missingPage ? post.collects : (detail.metrics.collects || post.collects),
     comments: missingPage ? post.comments : (detail.metrics.comments || post.comments),
+    metric_source: missingPage ? "card_fallback" : (detail.metrics.metric_source || "unknown"),
+    metric_debug: detail.metrics.metric_debug || [],
     cover_url: post.cover_url || (detail.images && detail.images[0]) || "",
     media,
     video_frame_paths: frames,
+    warnings: [
+      ...(detail.extraction_error ? [`detail extraction error: ${detail.extraction_error}`] : []),
+      ...(!missingPage && !detail.metrics.likes && !detail.metrics.collects && !detail.metrics.comments ? ["engagement metrics not found in visible action bar"] : []),
+    ],
     extraction_note: missingPage
       ? "The script found this post on the creator page, but the detail page could not be opened from the visible browser session; summary falls back to the visible card text."
       : media.video_count
@@ -559,78 +753,82 @@ async function main() {
   const args = parseArgs(process.argv);
   const postDate = addDays(args.reportDate, -1);
   const rl = createRl();
+  let browser;
   fs.mkdirSync(args.outDir, { recursive: true });
   fs.mkdirSync(args.profileDir, { recursive: true });
-  const creators = await ensureCreators(args, rl);
+  try {
+    const creators = await ensureCreators(args, rl);
 
-  const browser = await chromium.launchPersistentContext(args.profileDir, {
-    headless: args.headless,
-    viewport: { width: 1440, height: 1000 },
-  });
-  const page = browser.pages()[0] || await browser.newPage();
-  await page.goto("https://www.xiaohongshu.com/", { waitUntil: "domcontentloaded", timeout: 60000 }).catch(() => {});
-
-  console.log("\nA browser window is open.");
-  console.log("Log in to Xiaohongshu yourself if needed. Do not share your password, SMS code, cookies, or session token.");
-  console.log("After login, this script will automatically search/open watched creators and read visible page DOM.\n");
-  await ask(rl, "After login is complete, press Enter here to start creator collection...");
-
-  const packageFile = path.join(args.outDir, `xhs-watch-package-${args.reportDate}.json`);
-  const allPosts = [];
-  const allFollowers = [];
-
-  for (const creator of creators) {
-    await page.bringToFront();
-    console.log(`\nCreator: ${creator}`);
-    console.log("Automatically searching and opening the best matching visible result...");
-    const opened = await autoOpenCreatorPage(page, creator);
-    if (!opened.ok) {
-      console.log(`Automatic navigation failed for ${creator}: ${opened.reason}.`);
-      const base = await saveDebugSnapshot(page, args.outDir, creator, opened.reason);
-      console.log(`Saved debug snapshot: ${base}.txt / .png`);
-      if (args.manualFallback) {
-        console.log("Use the browser to open this creator's profile or yesterday's visible posts.");
-        console.log("If Xiaohongshu shows a verification/risk page, solve it manually or skip; this script will not bypass it.");
-        const answer = await ask(rl, "Press Enter to extract the currently visible page, or type s to skip: ");
-        if (answer.toLowerCase() === "s") continue;
-      } else {
-        console.log("Continuing with best-effort extraction from the current page, then moving to the next creator.");
-      }
-    } else {
-      console.log(`Opened page for ${creator} via ${opened.reason}. Extracting visible content...`);
-    }
-
-    const extracted = await extractVisiblePage(page, creator, postDate, args.reportDate);
-    const candidates = uniquePosts(extracted.posts.filter((post) => isYesterdayCandidate(post, creator))).slice(0, args.detailLimit);
-    const profileUrl = page.url();
-    const detailed = [];
-    console.log(`Found ${candidates.length} likely yesterday post(s). Opening detail pages...`);
-    for (let i = 0; i < candidates.length; i += 1) {
-      const detail = await extractDetailPage(page, creator, candidates[i], args, postDate, i + 1, profileUrl);
-      detailed.push(detail);
-      console.log(`  Detail ${i + 1}/${candidates.length}: ${detail.title || "(untitled)"}`);
-    }
-    allPosts.push(...detailed);
-    allFollowers.push(extracted.follower);
-    writeJson(packageFile, {
-      report_date: args.reportDate,
-      covered_publishing_date: postDate,
-      creators,
-      posts: allPosts,
-      followers: allFollowers,
-      generated_at: new Date().toISOString(),
-      browser_profile_dir: args.profileDir,
+    browser = await chromium.launchPersistentContext(args.profileDir, {
+      headless: args.headless,
+      viewport: { width: 1440, height: 1000 },
     });
-    console.log(`Captured ${detailed.length} detailed yesterday post(s) for ${creator}; follower count: ${extracted.follower.follower_count || "not found"}.`);
-    await sleep(1800);
+    const page = browser.pages()[0] || await browser.newPage();
+    await page.goto("https://www.xiaohongshu.com/", { waitUntil: "domcontentloaded", timeout: 60000 }).catch(() => {});
+
+    console.log("\nA browser window is open.");
+    console.log("Log in to Xiaohongshu yourself if needed. Do not share your password, SMS code, cookies, or session token.");
+    console.log("After login, this script will automatically search/open watched creators and read visible page DOM.\n");
+    await ask(rl, "After login is complete, press Enter here to start creator collection...");
+
+    const packageFile = path.join(args.outDir, `xhs-watch-package-${args.reportDate}.json`);
+    const allPosts = [];
+    const allFollowers = [];
+
+    for (const creator of creators) {
+      await page.bringToFront();
+      console.log(`\nCreator: ${creator}`);
+      console.log("Automatically searching and opening the best matching visible result...");
+      const opened = await autoOpenCreatorPage(page, creator);
+      if (!opened.ok) {
+        console.log(`Automatic navigation failed for ${creator}: ${opened.reason}.`);
+        const base = await saveDebugSnapshot(page, args.outDir, creator, opened.reason);
+        console.log(`Saved debug snapshot: ${base}.txt / .png`);
+        if (args.manualFallback) {
+          console.log("Use the browser to open this creator's profile or yesterday's visible posts.");
+          console.log("If Xiaohongshu shows a verification/risk page, solve it manually or skip; this script will not bypass it.");
+          const answer = await ask(rl, "Press Enter to extract the currently visible page, or type s to skip: ");
+          if (answer.toLowerCase() === "s") continue;
+        } else {
+          console.log("Continuing with best-effort extraction from the current page, then moving to the next creator.");
+        }
+      } else {
+        console.log(`Opened page for ${creator} via ${opened.reason}. Extracting visible content...`);
+      }
+
+      const extracted = await extractVisiblePage(page, creator, postDate, args.reportDate);
+      const candidates = uniquePosts(extracted.posts.filter((post) => isYesterdayCandidate(post, creator))).slice(0, args.detailLimit);
+      const profileUrl = page.url();
+      const detailed = [];
+      console.log(`Found ${candidates.length} likely yesterday post(s). Opening detail pages...`);
+      for (let i = 0; i < candidates.length; i += 1) {
+        const detail = await extractDetailPage(page, creator, candidates[i], args, postDate, i + 1, profileUrl);
+        detailed.push(detail);
+        console.log(`  Detail ${i + 1}/${candidates.length}: ${detail.title || "(untitled)"}`);
+      }
+      allPosts.push(...detailed);
+      allFollowers.push(extracted.follower);
+      writeJson(packageFile, {
+        schema_version: 2,
+        report_date: args.reportDate,
+        covered_publishing_date: postDate,
+        creators,
+        posts: allPosts,
+        followers: allFollowers,
+        generated_at: new Date().toISOString(),
+        browser_profile_dir: args.profileDir,
+      });
+      console.log(`Captured ${detailed.length} detailed yesterday post(s) for ${creator}; follower count: ${extracted.follower.follower_count || "not found"}.`);
+      await sleep(1800);
+    }
+
+    console.log("\nCollection complete.");
+    console.log(`Collection package: ${packageFile}`);
+    console.log(`Next: run daily_brief.py --package "${packageFile}" --language 中文 --detail 普通 and paste the Markdown report directly in chat.`);
+  } finally {
+    rl.close();
+    if (browser) await browser.close().catch(() => {});
   }
-
-  console.log("\nCollection complete.");
-  console.log(`Collection package: ${packageFile}`);
-  console.log(`Next: run daily_brief.py --package "${packageFile}" --language 中文 --detail 普通 and paste the Markdown report directly in chat.`);
-
-  rl.close();
-  await browser.close();
 }
 
 main().catch((error) => {
