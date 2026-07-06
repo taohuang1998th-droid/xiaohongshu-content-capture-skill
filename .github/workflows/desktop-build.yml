@@ -1,0 +1,55 @@
+name: Desktop Build
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "desktop-v*"
+
+jobs:
+  build-macos:
+    name: Build macOS DMG
+    runs-on: macos-15
+    defaults:
+      run:
+        working-directory: desktop-app
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: desktop-app/package-lock.json
+      - run: npm ci
+      - run: npx playwright install chromium
+      - run: npm run build:mac
+      - uses: actions/upload-artifact@v4
+        with:
+          name: xiaohongshu-content-capture-macos-arm64
+          path: desktop-app/dist/*.dmg
+
+  build-windows:
+    name: Build Windows Installer
+    runs-on: windows-2025
+    defaults:
+      run:
+        working-directory: desktop-app
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: desktop-app/package-lock.json
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: npm ci
+      - run: npx playwright install chromium
+      - run: npm run build:win
+      - uses: actions/upload-artifact@v4
+        with:
+          name: xiaohongshu-content-capture-windows-x64
+          path: |
+            desktop-app/dist/*.exe
+            desktop-app/dist/*.blockmap

@@ -22,6 +22,17 @@ npm run build:mac
 
 The DMG is written to `desktop-app/dist/`.
 
+Build a Windows installer on Windows:
+
+```powershell
+cd desktop-app
+npm install
+npm run install-browsers
+npm run build:win
+```
+
+The Windows installer is written to `desktop-app/dist/`.
+
 On Apple Silicon Macs, the default output is:
 
 ```text
@@ -51,3 +62,9 @@ The report renderer currently reuses the skill's Python script, so Python remain
 ## macOS Distribution Notes
 
 The generated DMG is unsigned by default. Friends may need to right-click the app and choose Open the first time on macOS. For wider distribution, sign and notarize the app with an Apple Developer ID. The current local build target is Apple Silicon (`arm64`); build an additional `x64` DMG if you need to support Intel Macs.
+
+## Windows Distribution Notes
+
+Use `npm run build:win` on a Windows machine, or run the GitHub Actions workflow named `Desktop Build`. The generated `.exe` is unsigned by default, so Windows SmartScreen may show a warning the first time. For broad distribution, sign the installer with a code-signing certificate.
+
+Python 3 is still required at runtime for report generation. The app checks `py -3`, `python`, and `python3` on Windows and shows a clear error if Python is missing.

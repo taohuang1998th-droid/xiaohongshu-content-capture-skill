@@ -11,9 +11,19 @@ const required = browsersJson.browsers
   .filter((browser) => browser.name === "chromium")
   .map((browser) => `${browser.name}-${browser.revision}`);
 
+function defaultPlaywrightCacheRoot() {
+  if (process.platform === "win32") {
+    return path.join(process.env.LOCALAPPDATA || path.join(os.homedir(), "AppData", "Local"), "ms-playwright");
+  }
+  if (process.platform === "darwin") {
+    return path.join(os.homedir(), "Library", "Caches", "ms-playwright");
+  }
+  return path.join(process.env.XDG_CACHE_HOME || path.join(os.homedir(), ".cache"), "ms-playwright");
+}
+
 const cacheRoot = process.env.PLAYWRIGHT_BROWSERS_PATH && process.env.PLAYWRIGHT_BROWSERS_PATH !== "0"
   ? process.env.PLAYWRIGHT_BROWSERS_PATH
-  : path.join(os.homedir(), "Library", "Caches", "ms-playwright");
+  : defaultPlaywrightCacheRoot();
 const targetRoot = path.join(desktopRoot, "build-resources", "ms-playwright");
 
 function copyDir(src, dest) {

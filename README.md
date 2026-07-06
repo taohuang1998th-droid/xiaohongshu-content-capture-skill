@@ -67,3 +67,12 @@ The current local build produces an Apple Silicon DMG such as:
 ```text
 desktop-app/dist/小红书内容简报-0.1.0-arm64.dmg
 ```
+
+To build a Windows installer, run this on Windows or use the GitHub Actions `Desktop Build` workflow:
+
+```powershell
+cd desktop-app
+npm run build:win
+```
+
+The Windows output is an unsigned `.exe` installer in `desktop-app/dist/`.

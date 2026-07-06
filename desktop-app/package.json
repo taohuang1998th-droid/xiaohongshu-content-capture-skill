@@ -10,6 +10,7 @@
     "install-browsers": "playwright install chromium",
     "prepare-browsers": "node scripts/prepare-playwright-browsers.js",
     "build:mac": "npm run check && npm run prepare-browsers && electron-builder --mac dmg",
+    "build:win": "npm run check && npm run prepare-browsers && electron-builder --win nsis --x64",
     "check": "node --check src/main.js && node --check src/preload.js && node --check src/renderer/renderer.js && node --check scripts/prepare-playwright-browsers.js"
   },
   "build": {
@@ -63,6 +64,25 @@
           "path": "/Applications"
         }
       ]
+    },
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "artifactName": "${productName}-${version}-win-${arch}.${ext}"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "小红书内容简报"
     }
   },
   "dependencies": {

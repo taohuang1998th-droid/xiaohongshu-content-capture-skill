@@ -53,6 +53,10 @@ function appDataDir() {
   return dir;
 }
 
+function processCwd() {
+  return appDataDir();
+}
+
 function send(channel, payload) {
   if (mainWindow && !mainWindow.isDestroyed()) {
     mainWindow.webContents.send(channel, payload);
@@ -81,9 +85,10 @@ function todayShanghai() {
 function runProcess(command, args, options = {}) {
   return new Promise((resolve, reject) => {
     const child = spawn(command, args, {
-      cwd: repoRoot,
+      cwd: processCwd(),
       env: { ...process.env, ...(options.env || {}) },
       stdio: ["ignore", "pipe", "pipe"],
+      windowsHide: true,
     });
 
     if (options.track) activeRun = child;
@@ -107,6 +112,38 @@ function runProcess(command, args, options = {}) {
       else reject(new Error(`${path.basename(command)} exited with code ${code}\n${stderr}`));
     });
   });
+}
+
+function commandExists(command, args = []) {
+  const result = spawn(command, args, {
+    cwd: processCwd(),
+    env: process.env,
+    stdio: ["ignore", "ignore", "ignore"],
+    windowsHide: true,
+  });
+  return new Promise((resolve) => {
+    result.on("error", () => resolve(false));
+    result.on("close", (code) => resolve(code === 0));
+  });
+}
+
+async function resolvePython() {
+  const candidates = process.platform === "win32"
+    ? [
+        { command: "py", args: ["-3"] },
+        { command: "python", args: [] },
+        { command: "python3", args: [] },
+      ]
+    : [
+        { command: "python3", args: [] },
+        { command: "python", args: [] },
+      ];
+
+  for (const candidate of candidates) {
+    if (await commandExists(candidate.command, [...candidate.args, "--version"])) return candidate;
+  }
+
+  throw new Error("Python 3 was not found. Install Python 3 and make sure it is available in PATH.");
 }
 
 ipcMain.handle("get-defaults", () => {
@@ -186,7 +223,9 @@ async function startRun(rawConfig) {
     const packageFile = path.join(outDir, `xhs-watch-package-${reportDate}.json`);
     if (!fs.existsSync(packageFile)) throw new Error(`Collection package was not created: ${packageFile}`);
 
-    const report = await runProcess("python3", [
+    const python = await resolvePython();
+    const report = await runProcess(python.command, [
+      ...python.args,
       reportScript,
       "--package", packageFile,
       "--creators-file", creatorsFile,
