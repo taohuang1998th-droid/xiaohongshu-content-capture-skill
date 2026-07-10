@@ -83,7 +83,7 @@ The workflow is:
 5. Detect likely yesterday posts, open each post detail page, and extract visible title/body/metrics/source link.
 6. If a visible video element is present, play it muted in the user's logged-in browser until the browser reports the video has ended, or until the configured maximum video wait time is reached. Save screenshot frames across playback for AI-assisted visual review. Do not claim audio transcription unless captions or text are visible. If full playback cannot be confirmed, say so explicitly in the brief.
 7. Save an internal JSON collection package.
-8. Generate the Markdown brief with `scripts/daily_brief.py --package ...` and paste the report body directly in the chat.
+8. Generate the Markdown brief with `scripts/daily_brief.py --package ... --archive-dir ... --no-stdout` so the terminal only shows saved paths, then read the saved Markdown file and paste the report body directly in the Codex/GPT chat.
 
 Pause for user intervention only when automatic navigation cannot find the creator page or Xiaohongshu shows a verification/risk page.
 
@@ -98,10 +98,12 @@ python3 scripts/daily_brief.py \
   --report-date 2026-07-06 \
   --package xhs-captures/xhs-watch-package-2026-07-06.json \
   --language 中文 \
-  --detail 普通
+  --detail 普通 \
+  --archive-dir daily-reports \
+  --no-stdout
 ```
 
-Omit `--out` when the user wants the report shown in the conversation. If `--out` is provided, still paste the important report content in chat.
+Use `--archive-dir` for normal daily operation. It writes a non-overwriting dated Markdown report and appends to `index.md` so prior reports can be browsed later. When the user wants the report shown in the conversation, read the saved Markdown file and paste the report body in chat. Do not make the user read the terminal output.
 
 Date behavior:
 
@@ -124,6 +126,13 @@ For each watched creator, include:
 - the requested output detail level: minimal, normal, or detailed
 
 If a creator has no matching post yesterday, show that explicitly.
+
+Report history requirements:
+
+- Never overwrite older daily reports.
+- Save generated reports into a dated archive directory with unique filenames.
+- Maintain an `index.md` history file with report date, covered publishing date, language, detail level, watched creators, and source package path.
+- When running inside Codex/GPT, display the newly generated report directly in the chat after saving it.
 
 For video posts, each post must include two separate natural-language paragraphs:
 

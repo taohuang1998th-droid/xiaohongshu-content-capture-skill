@@ -112,6 +112,38 @@ def load_package(path):
     return posts, followers, data
 
 
+def unique_report_path(directory, report_day, language, detail):
+    directory.mkdir(parents=True, exist_ok=True)
+    stem = f"{report_day.isoformat()}-{language}-{detail}"
+    candidate = directory / f"{stem}.md"
+    index = 2
+    while candidate.exists():
+        candidate = directory / f"{stem}-{index}.md"
+        index += 1
+    return candidate
+
+
+def append_history_index(directory, report_path, report_day, covered_day, language, detail, creators, package_path=None):
+    index_path = directory / "index.md"
+    rel_report = report_path.name
+    creator_text = ", ".join(creators)
+    package_text = f" | package: `{package_path}`" if package_path else ""
+    entry = (
+        f"- {datetime.now(ZoneInfo('Asia/Shanghai')).strftime('%Y-%m-%d %H:%M:%S')} "
+        f"| report: [{rel_report}]({rel_report}) "
+        f"| report_date: {report_day.isoformat()} "
+        f"| covered_date: {covered_day.isoformat()} "
+        f"| language: {language} "
+        f"| detail: {detail} "
+        f"| creators: {creator_text}{package_text}\n"
+    )
+    if not index_path.exists():
+        index_path.write_text("# Xiaohongshu Brief History\n\n", encoding="utf-8")
+    with index_path.open("a", encoding="utf-8") as f:
+        f.write(entry)
+    return index_path
+
+
 def read_creators(path):
     if not path.exists():
         return []
@@ -597,6 +629,8 @@ def main():
     parser.add_argument("--language", default="zh", help="Brief language: zh/en/bilingual, or 中文/英文/双语. Default: zh.")
     parser.add_argument("--detail", default="normal", help="Brief detail level: minimal/normal/detailed, or 极简/普通/详细. Default: normal.")
     parser.add_argument("--out", type=Path, help="Markdown output path. Defaults to stdout.")
+    parser.add_argument("--archive-dir", type=Path, help="Directory for non-overwriting dated report history. Also updates index.md.")
+    parser.add_argument("--no-stdout", action="store_true", help="Do not print the full report to terminal; print only saved paths.")
     args = parser.parse_args()
     args.language = normalize_language(args.language)
     args.detail = normalize_detail(args.detail)
@@ -623,11 +657,33 @@ def main():
         posts = [normalize_post(row, tz) for row in load_rows(args.posts)]
         followers = [normalize_follower(row, tz) for row in load_rows(args.followers)] if args.followers else []
 
+    covered_day = report_day - timedelta(days=1)
     report = render_report(posts, followers, creators, report_day, tz, args.language, args.detail)
+    saved_paths = []
     if args.out:
         args.out.write_text(report, encoding="utf-8")
-    else:
+        saved_paths.append(args.out)
+    if args.archive_dir:
+        archived = unique_report_path(args.archive_dir, report_day, args.language, args.detail)
+        archived.write_text(report, encoding="utf-8")
+        index_path = append_history_index(
+            args.archive_dir,
+            archived,
+            report_day,
+            covered_day,
+            args.language,
+            args.detail,
+            creators,
+            args.package,
+        )
+        saved_paths.extend([archived, index_path])
+
+    if not args.no_stdout:
         print(report)
+    elif saved_paths:
+        print("Saved report artifacts:")
+        for path in saved_paths:
+            print(path)
 
 
 if __name__ == "__main__":

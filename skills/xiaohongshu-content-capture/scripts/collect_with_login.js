@@ -227,7 +227,8 @@ function scoreCandidate(candidate, creator) {
   let score = 0;
   const text = `${candidate.text || ""} ${candidate.href || ""}`;
   if (text.includes(name)) score += 100;
-  if (/\/user\/profile|\/user\//i.test(candidate.href)) score += 25;
+  if (/\/user\/profile|\/user\//i.test(candidate.href)) score += 40;
+  if (/type=user/.test(candidate.href)) score += 8;
   if (/关注|粉丝|获赞|笔记/.test(candidate.text)) score += 10;
   if (/search_result/.test(candidate.href)) score -= 20;
   return score;
@@ -256,6 +257,7 @@ async function clickBestCreatorCandidate(page, creator) {
   const best = ranked[0];
   if (!best || best.score < 80) return false;
 
+  const beforeUrl = page.url();
   await Promise.all([
     page.waitForLoadState("domcontentloaded", { timeout: 15000 }).catch(() => {}),
     page.evaluate((targetHref) => {
@@ -264,6 +266,9 @@ async function clickBestCreatorCandidate(page, creator) {
     }, best.href),
   ]);
   await sleep(3500);
+  if (page.url() === beforeUrl && best.href && !/search_result/.test(best.href)) {
+    await safeGoto(page, best.href);
+  }
   return true;
 }
 
@@ -403,6 +408,7 @@ async function extractVisiblePage(page, creator, postDate, reportDate) {
 
     return {
       posts,
+      page_text_excerpt: textOf(document.body).slice(0, 4000),
       follower: {
         snapshot_date: reportDate,
         creator,
@@ -419,12 +425,33 @@ function noteIdFromUrl(url) {
   return match ? match[1] : String(url || "");
 }
 
-function isYesterdayCandidate(post, creator) {
+function targetDateTokens(postDate) {
+  const [year, month, day] = String(postDate || "").split("-").map(Number);
+  if (!year || !month || !day) return [];
+  return [
+    `${year}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`,
+    `${year}/${String(month).padStart(2, "0")}/${String(day).padStart(2, "0")}`,
+    `${year}年${month}月${day}日`,
+    `${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`,
+    `${month}-${day}`,
+    `${String(month).padStart(2, "0")}/${String(day).padStart(2, "0")}`,
+    `${month}/${day}`,
+    `${month}月${day}日`,
+  ];
+}
+
+function hasTargetDateSignal(text, postDate) {
+  const value = String(text || "");
+  if (/昨天|1天前|24小时前/.test(value)) return true;
+  return targetDateTokens(postDate).some((token) => value.includes(token));
+}
+
+function isYesterdayCandidate(post, creator, postDate) {
   const text = `${post.title || ""} ${post.body || ""}`;
   const creatorName = String(creator || "").replace(/^@/, "");
-  return /昨天|1天前/.test(text)
+  return hasTargetDateSignal(text, postDate)
     && /\/(?:explore|search_result)\//.test(post.url || "")
-    && (!creatorName || text.includes(creatorName));
+    && (!creatorName || text.includes(creatorName) || /\/user\/profile/.test(post.page_url || ""));
 }
 
 function uniquePosts(posts) {
@@ -875,10 +902,11 @@ async function main() {
       }
 
       const extracted = await extractVisiblePage(page, creator, postDate, args.reportDate);
-      const candidates = uniquePosts(extracted.posts.filter((post) => isYesterdayCandidate(post, creator))).slice(0, args.detailLimit);
+      const likelyPosts = extracted.posts.filter((post) => isYesterdayCandidate(post, creator, postDate));
+      const candidates = uniquePosts(likelyPosts).slice(0, args.detailLimit);
       const profileUrl = page.url();
       const detailed = [];
-      console.log(`Found ${candidates.length} likely yesterday post(s). Opening detail pages...`);
+      console.log(`Found ${candidates.length} likely target-date post(s) for ${postDate}. Opening detail pages...`);
       for (let i = 0; i < candidates.length; i += 1) {
         const detail = await extractDetailPage(page, creator, candidates[i], args, postDate, i + 1, profileUrl);
         detailed.push(detail);
@@ -893,6 +921,22 @@ async function main() {
         creators,
         posts: allPosts,
         followers: allFollowers,
+        candidate_debug: [
+          ...((fs.existsSync(packageFile) ? JSON.parse(fs.readFileSync(packageFile, "utf8")).candidate_debug : []) || []),
+          {
+            creator,
+            page_url: profileUrl,
+            extracted_post_count: extracted.posts.length,
+            matched_post_count: candidates.length,
+            target_date: postDate,
+            sample_candidates: extracted.posts.slice(0, 12).map((item) => ({
+              title: item.title,
+              body: String(item.body || "").slice(0, 220),
+              url: item.url,
+            })),
+            page_text_excerpt: extracted.page_text_excerpt,
+          },
+        ],
         generated_at: new Date().toISOString(),
         browser_profile_dir: args.profileDir,
       });
@@ -902,7 +946,7 @@ async function main() {
 
     console.log("\nCollection complete.");
     console.log(`Collection package: ${packageFile}`);
-    console.log(`Next: run daily_brief.py --package "${packageFile}" --language 中文 --detail 普通 and paste the Markdown report directly in chat.`);
+    console.log(`Next: run daily_brief.py --package "${packageFile}" --language bilingual --detail detailed --archive-dir daily-reports --no-stdout, then open the saved Markdown report in Codex/GPT chat.`);
   } finally {
     rl.close();
     if (browser) await browser.close().catch(() => {});
