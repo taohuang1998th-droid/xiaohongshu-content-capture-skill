@@ -21,6 +21,30 @@ Recommended fields:
 | `follower_count` | `粉丝数`, `followers`, `fans`, `fans_count` |
 | `previous_follower_count` | `昨日粉丝数`, `prev_followers`, `previous_followers` |
 
+Login-assisted collection packages also include:
+
+| Field | Meaning |
+| --- | --- |
+| `analysis_ready` | `true` only when strict text/video completeness checks pass |
+| `capture_status.content_type` | `text`, `video`, or `unknown` |
+| `capture_status.detail_verification` | Verified detail-page URL status and reason |
+| `capture_status.text_capture` | Full-text source, length, expansion count, stable reads, and completion status |
+| `capture_status.video_playback_completed` | Whether the browser confirmed that video playback reached the end |
+| `capture_status.video_frame_coverage_completed` | Whether all required timeline frame samples were saved |
+| `capture_status.video_frame_count_required` | Required frame count for analysis readiness |
+| `capture_status.video_frame_count_captured` | Successfully saved timeline frame count |
+| `capture_status.failure_reason` | Machine-readable reason when analysis is blocked |
+| `media.visible_caption_samples` | Visible subtitle/caption text sampled during full video playback |
+| `media.playback_rate_requested` | Requested rate (`max` or an explicit numeric rate) |
+| `media.playback_rate` | Actual highest rate accepted by the visible media element |
+| `media.frame_sample_count` | Number of captured timeline frames |
+| `media.frame_sample_targets_seconds` | Evenly distributed target timestamps across the media duration |
+| `media.frame_sampling_missed_targets_seconds` | Target timestamps that were skipped or failed to save; any value here blocks strict frame coverage |
+| `media.frame_sampling_strategy` | Sampling strategy; current strict value is `timeline-equidistant-paused-capture` |
+| `video_frame_samples` | Frame paths plus target time, actual media time, and playback rate |
+
+The report generator must not summarize, extract highlight details, or analyze a collected post when `analysis_ready` is explicitly `false`. Legacy user-provided exports without this field remain supported.
+
 ## Followers File
 
 Accepted formats: `.csv`, `.json`, `.jsonl`.

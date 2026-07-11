@@ -2,16 +2,17 @@ const state = {
   language: "中文",
   detail: "普通",
   running: false,
+  cancelRequested: false,
   runDir: "",
   reportPath: "",
+  historyPath: "",
 };
 
 const els = {
   creators: document.querySelector("#creators"),
   reportDate: document.querySelector("#reportDate"),
   detailLimit: document.querySelector("#detailLimit"),
-  playSeconds: document.querySelector("#playSeconds"),
-  playSecondsValue: document.querySelector("#playSecondsValue"),
+  videoFrameCount: document.querySelector("#videoFrameCount"),
   outputDir: document.querySelector("#outputDir"),
   chooseDir: document.querySelector("#chooseDir"),
   start: document.querySelector("#start"),
@@ -21,6 +22,7 @@ const els = {
   log: document.querySelector("#log"),
   openRunDir: document.querySelector("#openRunDir"),
   openReport: document.querySelector("#openReport"),
+  openHistory: document.querySelector("#openHistory"),
 };
 
 function setStatus(text, tone = "") {
@@ -83,19 +85,16 @@ document.querySelectorAll("[data-tab]").forEach((button) => {
   });
 });
 
-els.playSeconds.addEventListener("input", () => {
-  els.playSecondsValue.textContent = `${els.playSeconds.value} 秒`;
-});
-
 els.chooseDir.addEventListener("click", async () => {
   const dir = await window.xhsApp.chooseOutputDir();
   if (dir) els.outputDir.value = dir;
 });
 
 els.cancel.addEventListener("click", async () => {
+  state.cancelRequested = true;
   await window.xhsApp.cancelRun();
-  setRunning(false);
-  setStatus("已停止", "warn");
+  els.cancel.disabled = true;
+  setStatus("正在停止", "warn");
 });
 
 els.openRunDir.addEventListener("click", () => {
@@ -106,16 +105,23 @@ els.openReport.addEventListener("click", () => {
   if (state.reportPath) window.xhsApp.openPath(state.reportPath);
 });
 
+els.openHistory.addEventListener("click", () => {
+  if (state.historyPath) window.xhsApp.openPath(state.historyPath);
+});
+
 els.start.addEventListener("click", async () => {
   els.log.textContent = "";
   els.report.innerHTML = "正在采集，完成后会显示简报。";
   els.report.classList.add("empty");
   setRunning(true);
+  state.cancelRequested = false;
   setStatus("运行中", "busy");
   state.runDir = "";
   state.reportPath = "";
+  state.historyPath = "";
   els.openRunDir.disabled = true;
   els.openReport.disabled = true;
+  els.openHistory.disabled = true;
 
   try {
     const result = await window.xhsApp.startRun({
@@ -124,27 +130,35 @@ els.start.addEventListener("click", async () => {
       language: state.language,
       detail: state.detail,
       detailLimit: Number(els.detailLimit.value),
-      playSeconds: Number(els.playSeconds.value),
+      videoFrameCount: Number(els.videoFrameCount.value),
       outputDir: els.outputDir.value,
     });
     if (!result.ok) throw new Error(result.error || "运行失败");
     state.runDir = result.runDir;
     state.reportPath = result.reportPath;
+    state.historyPath = result.historyPath;
     els.report.classList.remove("empty");
     els.report.innerHTML = markdownToHtml(result.report);
     els.openRunDir.disabled = false;
     els.openReport.disabled = false;
+    els.openHistory.disabled = !state.historyPath;
     setStatus("简报已生成", "ok");
   } catch (error) {
-    els.report.textContent = error.message;
-    setStatus("运行失败", "error");
+    if (state.cancelRequested) {
+      els.report.textContent = "采集已停止，本次未完成的内容不会进入简报分析。";
+      setStatus("已停止", "warn");
+    } else {
+      els.report.textContent = error.message;
+      setStatus("运行失败", "error");
+    }
   } finally {
     setRunning(false);
   }
 });
 
 window.xhsApp.onLog(({ stream, text }) => {
-  els.log.textContent += text;
+  const next = els.log.textContent + text;
+  els.log.textContent = next.length > 500000 ? next.slice(-500000) : next;
   els.log.scrollTop = els.log.scrollHeight;
   if (stream === "stderr") setStatus("运行中，有提示信息", "warn");
 });
@@ -158,11 +172,15 @@ window.xhsApp.onState((payload) => {
     state.reportPath = payload.reportPath;
     els.openReport.disabled = false;
   }
+  if (payload.historyPath) {
+    state.historyPath = payload.historyPath;
+    els.openHistory.disabled = false;
+  }
   if (payload.report) {
     els.report.classList.remove("empty");
     els.report.innerHTML = markdownToHtml(payload.report);
   }
-  if (payload.error) {
+  if (payload.error && !state.cancelRequested) {
     els.report.textContent = payload.error;
   }
   setRunning(Boolean(payload.running));

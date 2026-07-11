@@ -107,20 +107,114 @@ def load_rows(path):
 
 def load_package(path):
     data = json.loads(path.read_text(encoding="utf-8"))
-    posts = data.get("posts", [])
-    followers = data.get("followers", [])
+    if not isinstance(data, dict):
+        raise ValueError(f"Collection package must be a JSON object: {path}")
+    posts = data.get("posts") if isinstance(data.get("posts"), list) else []
+    followers = data.get("followers") if isinstance(data.get("followers"), list) else []
     return posts, followers, data
 
 
-def unique_report_path(directory, report_day, language, detail):
+def daily_report_path(directory, report_day):
     directory.mkdir(parents=True, exist_ok=True)
-    stem = f"{report_day.isoformat()}-{language}-{detail}"
-    candidate = directory / f"{stem}.md"
-    index = 2
-    while candidate.exists():
-        candidate = directory / f"{stem}-{index}.md"
-        index += 1
-    return candidate
+    return directory / f"{report_day.isoformat()}.md"
+
+
+def remove_legacy_same_day_reports(directory, report_day):
+    removed = []
+    for language in ("zh", "en", "bilingual"):
+        for path in directory.glob(f"{report_day.isoformat()}-{language}-*.md"):
+            path.unlink()
+            removed.append(path)
+    return removed
+
+
+def value_is_present(value):
+    return value not in (None, "", [], {})
+
+
+def merge_values(previous, current):
+    if isinstance(previous, dict) and isinstance(current, dict):
+        merged = dict(previous)
+        for key, value in current.items():
+            merged[key] = merge_values(merged.get(key), value)
+        return merged
+    if isinstance(previous, list) and isinstance(current, list):
+        merged = list(previous)
+        for item in current:
+            if item not in merged:
+                merged.append(item)
+        return merged
+    return current if value_is_present(current) else previous
+
+
+def canonical_url(value):
+    return str(value or "").strip().split("?", 1)[0].rstrip("/")
+
+
+def post_merge_key(row):
+    creator = normalize_creator(first_value(row, POST_ALIASES["creator"]))
+    url = canonical_url(first_value(row, POST_ALIASES["url"]))
+    if url:
+        return ("url", url)
+    title = re.sub(r"\s+", " ", str(first_value(row, POST_ALIASES["title"]))).strip().lower()
+    published = str(first_value(row, POST_ALIASES["published_at"])).strip()
+    body = re.sub(r"\s+", " ", str(first_value(row, POST_ALIASES["body"]))).strip()[:120]
+    return ("fallback", creator, title, published, body)
+
+
+def follower_merge_key(row):
+    creator = normalize_creator(first_value(row, FOLLOWER_ALIASES["creator"]))
+    snapshot = str(first_value(row, FOLLOWER_ALIASES["snapshot_date"])).strip()
+    return creator, snapshot
+
+
+def merge_rows(previous_rows, current_rows, key_func):
+    merged = []
+    positions = {}
+    for row in list(previous_rows or []) + list(current_rows or []):
+        if not isinstance(row, dict):
+            continue
+        key = key_func(row)
+        if key in positions:
+            index = positions[key]
+            merged[index] = merge_values(merged[index], row)
+        else:
+            positions[key] = len(merged)
+            merged.append(dict(row))
+    return merged
+
+
+def merge_daily_state(directory, report_day, package, package_path=None):
+    state_dir = directory / ".report-state"
+    state_dir.mkdir(parents=True, exist_ok=True)
+    state_path = state_dir / f"{report_day.isoformat()}.json"
+    previous = {}
+    if state_path.exists():
+        try:
+            previous = json.loads(state_path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            previous = {}
+
+    merged = merge_values(previous, package)
+    merged["report_date"] = report_day.isoformat()
+    merged["creators"] = list(dict.fromkeys([
+        *[normalize_creator(item) for item in previous.get("creators", []) if normalize_creator(item)],
+        *[normalize_creator(item) for item in package.get("creators", []) if normalize_creator(item)],
+    ]))
+    merged["posts"] = merge_rows(previous.get("posts", []), package.get("posts", []), post_merge_key)
+    merged["followers"] = merge_rows(previous.get("followers", []), package.get("followers", []), follower_merge_key)
+    merged["candidate_debug"] = merge_rows(
+        previous.get("candidate_debug", []),
+        package.get("candidate_debug", []),
+        lambda row: normalize_creator(row.get("creator", "")),
+    )
+    source_packages = list(previous.get("source_packages", []))
+    if package_path and str(package_path) not in source_packages:
+        source_packages.append(str(package_path))
+    merged["source_packages"] = source_packages
+    merged["merged_at"] = datetime.now(ZoneInfo("Asia/Shanghai")).isoformat()
+    state_path.write_text(json.dumps(merged, ensure_ascii=False, indent=2), encoding="utf-8")
+    return merged, state_path
 
 
 def append_history_index(directory, report_path, report_day, covered_day, language, detail, creators, package_path=None):
@@ -137,10 +231,17 @@ def append_history_index(directory, report_path, report_day, covered_day, langua
         f"| detail: {detail} "
         f"| creators: {creator_text}{package_text}\n"
     )
-    if not index_path.exists():
-        index_path.write_text("# Xiaohongshu Brief History\n\n", encoding="utf-8")
-    with index_path.open("a", encoding="utf-8") as f:
-        f.write(entry)
+    existing_entries = []
+    if index_path.exists():
+        existing_entries = [line for line in index_path.read_text(encoding="utf-8").splitlines() if line.startswith("- ")]
+    report_marker = f"| report_date: {report_day.isoformat()} "
+    existing_entries = [line for line in existing_entries if report_marker not in line]
+    existing_entries.append(entry.rstrip())
+    existing_entries.sort(reverse=True)
+    index_path.write_text(
+        "# Xiaohongshu Brief History\n\n" + "\n".join(existing_entries) + "\n",
+        encoding="utf-8",
+    )
     return index_path
 
 
@@ -164,6 +265,7 @@ def creators_from_posts(posts, followers):
 
 
 def normalize_post(row, tz):
+    row = row if isinstance(row, dict) else {}
     record = {field: first_value(row, aliases) for field, aliases in POST_ALIASES.items()}
     record["creator"] = normalize_creator(record["creator"])
     record["published_at_raw"] = record["published_at"]
@@ -173,10 +275,13 @@ def normalize_post(row, tz):
     record["url"] = str(record["url"]).strip()
     record["detail_text"] = str(record["detail_text"]).strip()
     record["extraction_note"] = str(record["extraction_note"]).strip()
-    record["video_frame_paths"] = row.get("video_frame_paths", []) if isinstance(row, dict) else []
-    record["media"] = row.get("media", {}) if isinstance(row, dict) else {}
-    record["metric_source"] = str(row.get("metric_source", "")).strip() if isinstance(row, dict) else ""
-    record["warnings"] = row.get("warnings", []) if isinstance(row, dict) and isinstance(row.get("warnings"), list) else []
+    record["video_frame_paths"] = row.get("video_frame_paths") if isinstance(row.get("video_frame_paths"), list) else []
+    record["video_frame_samples"] = row.get("video_frame_samples") if isinstance(row.get("video_frame_samples"), list) else []
+    record["media"] = row.get("media") if isinstance(row.get("media"), dict) else {}
+    record["metric_source"] = str(row.get("metric_source", "")).strip()
+    record["warnings"] = row.get("warnings") if isinstance(row.get("warnings"), list) else []
+    record["analysis_ready"] = row.get("analysis_ready") if "analysis_ready" in row else None
+    record["capture_status"] = row.get("capture_status") if isinstance(row.get("capture_status"), dict) else {}
     for field in ("likes", "collects", "comments"):
         record[field] = parse_count(record[field], unknown_as_none=True)
     for field in ("follower_count", "previous_follower_count"):
@@ -222,13 +327,24 @@ LABELS = {
         "covered_date": "覆盖发布日期",
         "watched": "关注博主",
         "posts_loaded": "载入帖子数",
+        "posts_ready": "可生成分析的帖子数",
         "followers_loaded": "粉丝快照数",
         "caveat": "数据说明：本报告基于用户授权/手动提供的可见页面或导出数据生成。",
         "follower_count": "粉丝数",
         "delta": "较前日变化",
         "posts_found": "昨日帖子数",
-        "no_posts": "输入数据中未发现该博主昨日发布的帖子。",
+        "no_posts": "本次采集数据中未发现该博主昨日发布的帖子；这不等于确认该博主昨日没有更新。",
+        "collection_status": "采集状态",
+        "empty_posts_warning": "采集包包含粉丝快照但没有帖子详情，当前简报不能据此判断博主是否更新。",
+        "search_only_warning": "博主页面地址全部停留在搜索结果页，说明采集器没有成功进入账号主页。",
+        "diagnostics_missing_warning": "采集包缺少候选帖子诊断信息，可能由旧版或未完成的采集流程生成。",
+        "incomplete_capture_warning": "部分帖子未完成全文读取或完整视频播放，已从内容概括、亮点细节和分析中排除。",
+        "navigation_failure_warning": "部分博主主页或帖子详情页未通过严格导航验证，相关内容已跳过。",
+        "incomplete_posts": "采集未完成帖子数",
+        "incomplete_section": "未完成采集（不生成概括、亮点细节和分析）",
+        "failure_reason": "未完成原因",
         "summary": "内容概括",
+        "highlights": "亮点细节",
         "analysis": "内容分析",
         "likes": "点赞",
         "collects": "收藏",
@@ -253,13 +369,24 @@ LABELS = {
         "covered_date": "Covered publishing date",
         "watched": "Watched creators",
         "posts_loaded": "Posts loaded",
+        "posts_ready": "Posts eligible for analysis",
         "followers_loaded": "Follower snapshots loaded",
         "caveat": "Data caveat: this report is generated from authorized visible pages or user-provided exports.",
         "follower_count": "Follower count",
         "delta": "Change vs previous day",
         "posts_found": "Yesterday posts found",
-        "no_posts": "No yesterday posts from this creator were present in the input data.",
+        "no_posts": "No yesterday post was present for this creator in this capture; this does not confirm that the creator had no update.",
+        "collection_status": "Collection Status",
+        "empty_posts_warning": "The package contains follower snapshots but no post details, so it cannot establish whether creators published updates.",
+        "search_only_warning": "All creator page URLs remained on search results, which indicates that the collector did not reach the creator profiles.",
+        "diagnostics_missing_warning": "The package has no candidate-post diagnostics and may have been produced by an older or incomplete collection run.",
+        "incomplete_capture_warning": "Some posts did not complete full-text reading or full video playback and were excluded from summaries, highlight details, and analysis.",
+        "navigation_failure_warning": "Some creator profiles or post detail pages failed strict navigation verification and were skipped.",
+        "incomplete_posts": "Incomplete captures",
+        "incomplete_section": "Incomplete captures (no summary, highlight details, or analysis)",
+        "failure_reason": "Failure reason",
         "summary": "Content summary",
+        "highlights": "Highlight details",
         "analysis": "Content analysis",
         "likes": "Likes",
         "collects": "Collects",
@@ -338,6 +465,33 @@ def normalize_detail(value):
     return aliases[text]
 
 
+def assess_package(package):
+    warnings = []
+    posts = package.get("posts", [])
+    followers = package.get("followers", [])
+    if followers and not posts:
+        warnings.append("empty_posts_warning")
+    page_urls = [str(row.get("page_url", "")) for row in followers if isinstance(row, dict) and row.get("page_url")]
+    if page_urls and all("/search_result" in url for url in page_urls):
+        warnings.append("search_only_warning")
+    if not package.get("candidate_debug"):
+        warnings.append("diagnostics_missing_warning")
+    if any(isinstance(post, dict) and post.get("analysis_ready") is False for post in posts):
+        warnings.append("incomplete_capture_warning")
+    navigation_reasons = {"verification", "not-profile-url", "creator-name-mismatch", "profile-signals-missing", "post-url-mismatch", "post-unavailable"}
+    if any(
+        isinstance(item, dict)
+        and (item.get("stage") == "creator-navigation" or item.get("reason") in navigation_reasons)
+        for item in package.get("collection_failures", [])
+    ):
+        warnings.append("navigation_failure_warning")
+    return warnings
+
+
+def is_analysis_ready(post):
+    return post.get("analysis_ready") is not False
+
+
 def metric_score(post):
     return sum(post[field] or 0 for field in ("likes", "collects", "comments"))
 
@@ -352,10 +506,13 @@ def summarize(text, limit=180):
 def content_source(post):
     detail = post.get("detail_text") or ""
     body = post.get("body") or ""
+    captions = post.get("media", {}).get("visible_caption_samples", [])
+    caption_text = " ".join(str(item).strip() for item in captions if str(item).strip())
     boilerplate_markers = ("沪ICP备", "营业执照", "公网安备", "增值电信业务经营许可证")
     if body and any(marker in detail for marker in boilerplate_markers):
-        return body
-    return detail or body or post.get("title") or ""
+        detail = body
+    source = detail or body or post.get("title") or ""
+    return f"{source} {caption_text}".strip()
 
 
 def chinese_sentences(text):
@@ -450,6 +607,94 @@ def summarize_content(post, language="zh", detail="normal"):
     return summary
 
 
+def frame_times(post):
+    samples = post.get("video_frame_samples") if isinstance(post.get("video_frame_samples"), list) else []
+    values = []
+    for sample in samples:
+        if not isinstance(sample, dict):
+            continue
+        value = sample.get("actual_seconds")
+        if isinstance(value, (int, float)):
+            values.append(round(float(value), 1))
+    if values:
+        return values
+    media = post.get("media") if isinstance(post.get("media"), dict) else {}
+    targets = media.get("frame_sample_targets_seconds") if isinstance(media.get("frame_sample_targets_seconds"), list) else []
+    return [round(float(value), 1) for value in targets if isinstance(value, (int, float))]
+
+
+def positive_number(value, fallback=1):
+    if isinstance(value, bool):
+        return fallback
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return fallback
+    return parsed if parsed > 0 else fallback
+
+
+def highlight_details_zh(post):
+    media = post.get("media") if isinstance(post.get("media"), dict) else {}
+    details = []
+    if media.get("video_count"):
+        rate = positive_number(media.get("playback_rate"))
+        times = frame_times(post)
+        if times:
+            details.append(f"视频以播放器支持的 {rate:g} 倍速完整播放，并在视频时间轴的 {', '.join(f'{value:g}s' for value in times)} 抽取 {len(times)} 帧；截帧时暂停画面，完成后恢复最高倍速。")
+        else:
+            details.append(f"视频以播放器支持的 {rate:g} 倍速播放，并按视频时间轴进行等距抽帧。")
+        caption_rows = media.get("visible_caption_samples") if isinstance(media.get("visible_caption_samples"), list) else []
+        captions = [str(item).strip() for item in caption_rows if str(item).strip()]
+        if captions:
+            details.append(f"可见字幕/屏幕文字包括：{summarize('；'.join(captions[:3]), 180)}")
+    else:
+        tags = extract_hashtags(content_source(post))
+        if tags:
+            details.append(f"正文中可直接识别的主题线索包括：{'、'.join(tags[:6])}。")
+        details.append("亮点判断基于已展开并稳定复读的全文、标题结构、封面/图片证据和互动数据。")
+    likes = post.get("likes")
+    collects = post.get("collects")
+    comments = post.get("comments")
+    if isinstance(likes, int) and likes > 0 and isinstance(collects, int):
+        details.append(f"收藏/点赞比约为 {collects / likes:.0%}，评论数为 {comments if isinstance(comments, int) else '未知'}，可用于判断资料价值与讨论强度。")
+    return " ".join(details)
+
+
+def highlight_details_en(post):
+    media = post.get("media") if isinstance(post.get("media"), dict) else {}
+    details = []
+    if media.get("video_count"):
+        rate = positive_number(media.get("playback_rate"))
+        times = frame_times(post)
+        if times:
+            details.append(f"The video completed at the highest supported {rate:g}x rate with {len(times)} timeline-based frames sampled at {', '.join(f'{value:g}s' for value in times)}; playback paused for each screenshot and then resumed at maximum speed.")
+        else:
+            details.append(f"The video used the highest supported {rate:g}x rate with timeline-distributed frame sampling.")
+        caption_rows = media.get("visible_caption_samples") if isinstance(media.get("visible_caption_samples"), list) else []
+        captions = [str(item).strip() for item in caption_rows if str(item).strip()]
+        if captions:
+            details.append(f"Visible captions or on-screen text included: {summarize('; '.join(captions[:3]), 180)}")
+    else:
+        tags = extract_hashtags(content_source(post))
+        if tags:
+            details.append(f"Visible topic signals include: {', '.join(tags[:6])}.")
+        details.append("Highlights are grounded in the fully expanded stable text, title structure, cover/image evidence, and engagement data.")
+    likes = post.get("likes")
+    collects = post.get("collects")
+    comments = post.get("comments")
+    if isinstance(likes, int) and likes > 0 and isinstance(collects, int):
+        details.append(f"The save-to-like ratio is about {collects / likes:.0%}, with {comments if isinstance(comments, int) else 'unknown'} comments, indicating reference value and discussion intensity.")
+    return " ".join(details)
+
+
+def highlight_details(post, language="zh"):
+    if language == "en":
+        return highlight_details_en(post)
+    if language == "bilingual":
+        return f"{highlight_details_zh(post)}\n  - EN: {highlight_details_en(post)}"
+    return highlight_details_zh(post)
+
+
 def analyze_post_zh(post):
     text = content_source(post)
     title = post.get("title") or ""
@@ -493,7 +738,7 @@ def analyze_post(post, language="zh"):
 
 
 def render_doc_analysis(posts, creators, language):
-    all_posts = [post for post in posts if post["creator"] in creators]
+    all_posts = [post for post in posts if post["creator"] in creators and is_analysis_ready(post)]
     with_posts = [post for post in all_posts if post.get("title") or post.get("body") or post.get("detail_text")]
     video_count = sum(1 for post in all_posts if post.get("media", {}).get("video_count"))
     lines = [
@@ -532,14 +777,32 @@ def latest_count_for(creator, target_day, lookup):
     return snapshots[max(earlier)]
 
 
-def render_report(posts, followers, creators, report_day, tz, language="zh", detail="normal"):
+def render_incomplete_posts(posts, language):
+    if not posts:
+        return []
+    lines = [f"### {label('incomplete_section', language)}", ""]
+    for post in posts:
+        reason = post.get("capture_status", {}).get("failure_reason") or "capture-incomplete"
+        title = (post.get("title") or "(untitled)").replace(" - 小红书", "")
+        lines += [
+            f"- {title}",
+            f"  - {label('failure_reason', language)}: {reason}",
+            f"  - {label('link', language)}: {post.get('url') or 'No URL provided'}",
+        ]
+    lines += [""]
+    return lines
+
+
+def render_report(posts, followers, creators, report_day, tz, language="zh", detail="normal", collection_warnings=None):
     target_day = report_day - timedelta(days=1)
     prior_snapshot_day = report_day - timedelta(days=1)
     lookup = follower_lookup(posts, followers)
     posts_by_creator = defaultdict(list)
+    incomplete_by_creator = defaultdict(list)
     for post in posts:
         if post["creator"] in creators and post["published_at"] and post["published_at"].date() == target_day:
-            posts_by_creator[post["creator"]].append(post)
+            target = posts_by_creator if is_analysis_ready(post) else incomplete_by_creator
+            target[post["creator"]].append(post)
 
     lines = [
         f"# {label('title', language)}",
@@ -551,16 +814,23 @@ def render_report(posts, followers, creators, report_day, tz, language="zh", det
     if detail != "minimal":
         lines += [
             f"- {label('posts_loaded', language)}: {len(posts)}",
+            f"- {label('posts_ready', language)}: {sum(1 for post in posts if is_analysis_ready(post))}",
             f"- {label('followers_loaded', language)}: {len(followers)}",
             f"- {label('caveat', language)}",
         ]
     lines += [""]
+
+    if collection_warnings:
+        lines += [f"## {label('collection_status', language)}", ""]
+        lines += [f"- {label(item, language)}" for item in collection_warnings]
+        lines += [""]
 
     for creator in creators:
         current = latest_count_for(creator, report_day, lookup) or latest_count_for(creator, target_day, lookup)
         previous = latest_count_for(creator, prior_snapshot_day, lookup)
         delta = current - previous if current and previous else None
         creator_posts = sorted(posts_by_creator.get(creator, []), key=metric_score, reverse=True)
+        incomplete_posts = incomplete_by_creator.get(creator, [])
 
         lines += [
             f"## {creator}",
@@ -568,51 +838,54 @@ def render_report(posts, followers, creators, report_day, tz, language="zh", det
             f"- {label('follower_count', language)}: {fmt_count(current) if current else 'unknown'}",
             f"- {label('delta', language)}: {fmt_delta(delta)}",
             f"- {label('posts_found', language)}: {len(creator_posts)}",
+            f"- {label('incomplete_posts', language)}: {len(incomplete_posts)}",
             "",
         ]
 
         if not creator_posts:
             lines += [label("no_posts", language), ""]
-            continue
-
-        for idx, post in enumerate(creator_posts, 1):
-            frame_lines = []
-            if detail == "detailed" and post.get("video_frame_paths"):
-                frame_lines = [f"- {label('frames', language)}:", *[f"  - {path}" for path in post["video_frame_paths"][:3]]]
-            lines += [
-                f"### {idx}. {(post['title'] or '(untitled)').replace(' - 小红书', '')}",
-                "",
-            ]
-            if detail == "minimal":
+        else:
+            for idx, post in enumerate(creator_posts, 1):
+                frame_lines = []
+                if detail == "detailed" and post.get("video_frame_paths"):
+                    frame_lines = [f"- {label('frames', language)}:", *[f"  - {path}" for path in post["video_frame_paths"][:3]]]
                 lines += [
-                    f"- {label('summary', language)}: {summarize_content(post, language, detail)}",
-                    f"- {label('link', language)}: {post['url'] or 'No URL provided'}",
+                    f"### {idx}. {(post['title'] or '(untitled)').replace(' - 小红书', '')}",
                     "",
                 ]
-                continue
+                if detail == "minimal":
+                    lines += [
+                        f"- {label('summary', language)}: {summarize_content(post, language, detail)}",
+                        f"- {label('link', language)}: {post['url'] or 'No URL provided'}",
+                        "",
+                    ]
+                    continue
 
-            lines += [
-                f"- {label('summary', language)}: {summarize_content(post, language, detail)}",
-                f"- {label('analysis', language)}: {analyze_post(post, language)}",
-                f"- {label('likes', language)}: {fmt_count(post['likes'])}",
-                f"- {label('collects', language)}: {fmt_count(post['collects'])}",
-                f"- {label('comments', language)}: {fmt_count(post['comments'])}",
-                f"- {label('link', language)}: {post['url'] or 'No URL provided'}",
-            ]
-            if detail == "detailed":
-                warning_lines = []
-                if post.get("warnings"):
-                    warning_lines = [f"- {label('warnings', language)}:", *[f"  - {item}" for item in post["warnings"]]]
                 lines += [
-                    f"- {label('extraction', language)}: {post.get('extraction_note') or label('detail_only', language)}",
-                    f"- {label('metric_source', language)}: {post.get('metric_source') or 'unknown'}",
-                    *warning_lines,
-                    *frame_lines,
+                    f"- {label('summary', language)}: {summarize_content(post, language, detail)}",
+                    f"- {label('highlights', language)}: {highlight_details(post, language)}",
+                    f"- {label('analysis', language)}: {analyze_post(post, language)}",
+                    f"- {label('likes', language)}: {fmt_count(post['likes'])}",
+                    f"- {label('collects', language)}: {fmt_count(post['collects'])}",
+                    f"- {label('comments', language)}: {fmt_count(post['comments'])}",
+                    f"- {label('link', language)}: {post['url'] or 'No URL provided'}",
                 ]
-            lines += [""]
+                if detail == "detailed":
+                    warning_lines = []
+                    if post.get("warnings"):
+                        warning_lines = [f"- {label('warnings', language)}:", *[f"  - {item}" for item in post["warnings"]]]
+                    lines += [
+                        f"- {label('extraction', language)}: {post.get('extraction_note') or label('detail_only', language)}",
+                        f"- {label('metric_source', language)}: {post.get('metric_source') or 'unknown'}",
+                        *warning_lines,
+                        *frame_lines,
+                    ]
+                lines += [""]
+
+        lines += render_incomplete_posts(incomplete_posts, language)
 
     if detail != "minimal":
-        lines += render_doc_analysis(posts, creators, language)
+        lines += render_doc_analysis([post for post in posts if is_analysis_ready(post)], creators, language)
     return "\n".join(lines)
 
 
@@ -629,7 +902,7 @@ def main():
     parser.add_argument("--language", default="zh", help="Brief language: zh/en/bilingual, or 中文/英文/双语. Default: zh.")
     parser.add_argument("--detail", default="normal", help="Brief detail level: minimal/normal/detailed, or 极简/普通/详细. Default: normal.")
     parser.add_argument("--out", type=Path, help="Markdown output path. Defaults to stdout.")
-    parser.add_argument("--archive-dir", type=Path, help="Directory for non-overwriting dated report history. Also updates index.md.")
+    parser.add_argument("--archive-dir", type=Path, help="Directory for one merged report per date plus historical index.md.")
     parser.add_argument("--no-stdout", action="store_true", help="Do not print the full report to terminal; print only saved paths.")
     args = parser.parse_args()
     args.language = normalize_language(args.language)
@@ -639,10 +912,15 @@ def main():
     report_day = date.fromisoformat(args.report_date) if args.report_date else datetime.now(tz).date()
     creators = read_creators(args.creators_file)
 
+    package = {}
     if args.package:
         raw_posts, raw_followers, package = load_package(args.package)
         if not args.report_date and package.get("report_date"):
             report_day = date.fromisoformat(package["report_date"])
+        if args.archive_dir:
+            package, _ = merge_daily_state(args.archive_dir, report_day, package, args.package)
+            raw_posts = package.get("posts", [])
+            raw_followers = package.get("followers", [])
         if not creators:
             creators = [normalize_creator(item) for item in package.get("creators", []) if normalize_creator(item)]
         if not creators:
@@ -658,14 +936,26 @@ def main():
         followers = [normalize_follower(row, tz) for row in load_rows(args.followers)] if args.followers else []
 
     covered_day = report_day - timedelta(days=1)
-    report = render_report(posts, followers, creators, report_day, tz, args.language, args.detail)
+    collection_warnings = assess_package(package) if package else []
+    report = render_report(
+        posts,
+        followers,
+        creators,
+        report_day,
+        tz,
+        args.language,
+        args.detail,
+        collection_warnings,
+    )
     saved_paths = []
     if args.out:
+        args.out.parent.mkdir(parents=True, exist_ok=True)
         args.out.write_text(report, encoding="utf-8")
         saved_paths.append(args.out)
     if args.archive_dir:
-        archived = unique_report_path(args.archive_dir, report_day, args.language, args.detail)
+        archived = daily_report_path(args.archive_dir, report_day)
         archived.write_text(report, encoding="utf-8")
+        remove_legacy_same_day_reports(args.archive_dir, report_day)
         index_path = append_history_index(
             args.archive_dir,
             archived,

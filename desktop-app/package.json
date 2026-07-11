@@ -11,7 +11,10 @@
     "prepare-browsers": "node scripts/prepare-playwright-browsers.js",
     "build:mac": "npm run check && npm run prepare-browsers && electron-builder --mac dmg",
     "build:win": "npm run check && npm run prepare-browsers && electron-builder --win nsis --x64",
-    "check": "node --check src/main.js && node --check src/preload.js && node --check src/renderer/renderer.js && node --check scripts/prepare-playwright-browsers.js"
+    "test:js": "node --test ../tests/test_collector.js ../tests/test_desktop_config.js",
+    "test:python": "node scripts/run-python-tests.js",
+    "test": "npm run test:js && npm run test:python",
+    "check": "node --check src/config.js && node --check src/main.js && node --check src/preload.js && node --check src/renderer/renderer.js && node --check scripts/prepare-playwright-browsers.js && node --check scripts/run-python-tests.js && npm test"
   },
   "build": {
     "appId": "com.taohuang.xiaohongshu-content-capture",

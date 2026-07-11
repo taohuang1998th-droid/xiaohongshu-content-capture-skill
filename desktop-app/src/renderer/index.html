@@ -49,9 +49,8 @@
         </div>
 
         <label class="field">
-          <span>视频播放秒数</span>
-          <input id="playSeconds" type="range" min="0" max="30" step="1" value="8">
-          <output id="playSecondsValue">8 秒</output>
+          <span>视频时间轴抽帧数</span>
+          <input id="videoFrameCount" type="number" min="4" max="24" step="1" value="6">
         </label>
 
         <label class="field path-field">
@@ -80,6 +79,7 @@
         <div class="footer-actions">
           <button id="openRunDir" type="button" disabled>打开运行目录</button>
           <button id="openReport" type="button" disabled>打开报告</button>
+          <button id="openHistory" type="button" disabled>历史简报</button>
         </div>
       </section>
     </main>

@@ -3,12 +3,33 @@ name: Desktop Build
 on:
   workflow_dispatch:
   push:
+    branches:
+      - main
     tags:
       - "desktop-v*"
+  pull_request:
 
 jobs:
+  validate:
+    name: Validate skill and desktop app
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: desktop-app
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: npm run check
+
   build-macos:
     name: Build macOS DMG
+    needs: validate
+    if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/desktop-v')
     runs-on: macos-15
     defaults:
       run:
@@ -30,6 +51,8 @@ jobs:
 
   build-windows:
     name: Build Windows Installer
+    needs: validate
+    if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/desktop-v')
     runs-on: windows-2025
     defaults:
       run:

@@ -2,7 +2,9 @@
 const fs = require("fs");
 const path = require("path");
 const readline = require("readline");
-const { chromium } = require("playwright");
+
+const COLLECTOR_VERSION = "3.1.0";
+const CAPTURE_POLICY_VERSION = 2;
 
 function parseArgs(argv) {
   const args = {
@@ -14,7 +16,9 @@ function parseArgs(argv) {
     manualFallback: false,
     detailLimit: 6,
     playSeconds: 12,
-    maxVideoSeconds: 600,
+    maxVideoSeconds: 1800,
+    videoPlaybackRate: "max",
+    videoFrameCount: 6,
   };
   for (let i = 2; i < argv.length; i += 1) {
     const arg = argv[i];
@@ -29,10 +33,12 @@ function parseArgs(argv) {
     else if (arg === "--detail-limit") args.detailLimit = Number(requireValue(arg, next)), i += 1;
     else if (arg === "--play-seconds") args.playSeconds = Number(requireValue(arg, next)), i += 1;
     else if (arg === "--max-video-seconds") args.maxVideoSeconds = Number(requireValue(arg, next)), i += 1;
+    else if (arg === "--video-playback-rate") args.videoPlaybackRate = requireValue(arg, next), i += 1;
+    else if (arg === "--video-frame-count") args.videoFrameCount = Number(requireValue(arg, next)), i += 1;
     else if (arg === "--help" || arg === "-h") {
       printHelp();
       process.exit(0);
-    }
+    } else throw new Error(`Unknown option: ${arg}`);
   }
   validateArgs(args);
   return args;
@@ -46,7 +52,7 @@ function requireValue(arg, value) {
 }
 
 function validateArgs(args) {
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(args.reportDate)) {
+  if (!isValidIsoDate(args.reportDate)) {
     throw new Error("--report-date must use YYYY-MM-DD.");
   }
   if (!Number.isInteger(args.detailLimit) || args.detailLimit < 1 || args.detailLimit > 50) {
@@ -58,6 +64,24 @@ function validateArgs(args) {
   if (!Number.isFinite(args.maxVideoSeconds) || args.maxVideoSeconds < 10 || args.maxVideoSeconds > 1800) {
     throw new Error("--max-video-seconds must be a number from 10 to 1800.");
   }
+  if (args.videoPlaybackRate !== "max") {
+    args.videoPlaybackRate = Number(args.videoPlaybackRate);
+    if (!Number.isFinite(args.videoPlaybackRate) || args.videoPlaybackRate < 1 || args.videoPlaybackRate > 16) {
+      throw new Error("--video-playback-rate must be max or a number from 1 to 16.");
+    }
+  }
+  if (!Number.isInteger(args.videoFrameCount) || args.videoFrameCount < 4 || args.videoFrameCount > 24) {
+    throw new Error("--video-frame-count must be an integer from 4 to 24.");
+  }
+}
+
+function isValidIsoDate(value) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(String(value || ""))) return false;
+  const [year, month, day] = value.split("-").map(Number);
+  const parsed = new Date(Date.UTC(year, month - 1, day));
+  return parsed.getUTCFullYear() === year
+    && parsed.getUTCMonth() === month - 1
+    && parsed.getUTCDate() === day;
 }
 
 function printHelp() {
@@ -70,8 +94,10 @@ Options:
   --out-dir <path>       Directory for the collection package and generated screenshots.
   --profile-dir <path>   Browser profile directory for your manual login session.
   --detail-limit <n>     Max yesterday posts to open per creator. Default: 6.
-  --play-seconds <n>     Fallback seconds when visible video duration cannot be read. Default: 12.
-  --max-video-seconds <n> Maximum seconds to wait while playing a video to completion. Default: 600.
+  --play-seconds <n>     Legacy compatibility option. Videos now wait for a verified end.
+  --max-video-seconds <n> Maximum seconds to wait while playing a video to completion. Default: 1800.
+  --video-playback-rate <max|n> Use the highest media rate supported by the visible player, or 1-16. Default: max.
+  --video-frame-count <n> Number of timeline-distributed video frames to capture. Default: 6.
   --headless             Run headless. Not recommended because login needs a visible browser.
   --manual-fallback      Pause for user intervention if automatic navigation cannot find a creator page.
   --no-manual-fallback   Do not pause if automatic navigation cannot find a creator page. Default.
@@ -106,11 +132,12 @@ function normalizeCreator(name) {
 
 function readCreators(file) {
   if (!fs.existsSync(file)) return [];
-  return fs.readFileSync(file, "utf8")
+  return Array.from(new Set(fs.readFileSync(file, "utf8")
     .split(/\r?\n/)
     .map((line) => line.trim())
     .filter((line) => line && !line.startsWith("#"))
-    .map(normalizeCreator);
+    .map(normalizeCreator)
+    .filter(Boolean)));
 }
 
 function writeCreators(file, creators) {
@@ -168,8 +195,19 @@ function sleep(ms) {
 }
 
 async function safeGoto(page, url) {
-  await page.goto(url, { waitUntil: "domcontentloaded", timeout: 60000 }).catch(() => {});
+  let error = "";
+  try {
+    await page.goto(url, { waitUntil: "domcontentloaded", timeout: 60000 });
+  } catch (caught) {
+    error = String(caught && caught.message ? caught.message : caught);
+  }
   await sleep(6500);
+  return {
+    ok: !error,
+    requested_url: url,
+    final_url: page.url(),
+    error,
+  };
 }
 
 async function visibleText(page) {
@@ -211,6 +249,29 @@ async function waitForCreatorSignals(page, creator, timeoutMs = 18000) {
   return false;
 }
 
+function isCreatorProfileUrl(url) {
+  return /\/user\/profile(?:\/|\?|$)/i.test(String(url || ""));
+}
+
+async function verifyCreatorProfile(page, creator) {
+  const url = page.url();
+  const text = await visibleText(page);
+  const name = creator.replace(/^@/, "");
+  if (/验证码|验证|风险|异常|安全验证/.test(text)) {
+    return { ok: false, reason: "verification", url };
+  }
+  if (!isCreatorProfileUrl(url)) {
+    return { ok: false, reason: "not-profile-url", url };
+  }
+  if (!text.includes(name)) {
+    return { ok: false, reason: "creator-name-mismatch", url };
+  }
+  if (!/(关注|粉丝|获赞|收藏|笔记|followers?)/i.test(text)) {
+    return { ok: false, reason: "profile-signals-missing", url };
+  }
+  return { ok: true, reason: "verified-profile", url };
+}
+
 async function saveDebugSnapshot(page, outDir, creator, reason) {
   const safeName = creator.replace(/^@/, "").replace(/[^\p{L}\p{N}_-]+/gu, "_") || "unknown";
   const debugDir = path.join(outDir, "debug");
@@ -234,7 +295,7 @@ function scoreCandidate(candidate, creator) {
   return score;
 }
 
-async function clickBestCreatorCandidate(page, creator) {
+async function findBestCreatorCandidate(page, creator) {
   const candidates = await page.evaluate(() => {
     const isVisible = (el) => {
       const rect = el.getBoundingClientRect();
@@ -252,24 +313,14 @@ async function clickBestCreatorCandidate(page, creator) {
   }).catch(() => []);
 
   const ranked = candidates
+    .filter((candidate) => isCreatorProfileUrl(candidate.href))
     .map((candidate) => ({ ...candidate, score: scoreCandidate(candidate, creator) }))
     .sort((a, b) => b.score - a.score);
   const best = ranked[0];
-  if (!best || best.score < 80) return false;
-
-  const beforeUrl = page.url();
-  await Promise.all([
-    page.waitForLoadState("domcontentloaded", { timeout: 15000 }).catch(() => {}),
-    page.evaluate((targetHref) => {
-      const link = Array.from(document.querySelectorAll("a[href]")).find((a) => a.href === targetHref);
-      if (link) link.click();
-    }, best.href),
-  ]);
-  await sleep(3500);
-  if (page.url() === beforeUrl && best.href && !/search_result/.test(best.href)) {
-    await safeGoto(page, best.href);
-  }
-  return true;
+  return {
+    best: best && best.score >= 80 ? best : null,
+    candidates: ranked.slice(0, 8),
+  };
 }
 
 async function autoOpenCreatorPage(page, creator) {
@@ -279,27 +330,54 @@ async function autoOpenCreatorPage(page, creator) {
     `https://www.xiaohongshu.com/search_result?keyword=${keyword}`,
   ];
 
+  const attempts = [];
   for (const url of searchUrls) {
-    await safeGoto(page, url);
+    const searchNavigation = await safeGoto(page, url);
     await clickVisibleExactText(page, "用户");
     await sleep(5000);
     await waitForCreatorSignals(page, creator);
     const text = await visibleText(page);
     if (/验证码|验证|风险|异常|安全验证/.test(text)) {
-      return { ok: false, reason: "verification" };
+      return { ok: false, reason: "verification", attempts };
     }
     if (text.includes(creator.replace(/^@/, ""))) {
-      const clicked = await clickBestCreatorCandidate(page, creator);
-      if (clicked) {
-        await page.mouse.wheel(0, 900).catch(() => {});
-        await sleep(1200);
-        await page.mouse.wheel(0, -400).catch(() => {});
-        await sleep(800);
-        return { ok: true, reason: "clicked-search-result" };
+      const found = await findBestCreatorCandidate(page, creator);
+      if (found.best) {
+        const profileNavigation = await safeGoto(page, found.best.href);
+        const verification = await verifyCreatorProfile(page, creator);
+        attempts.push({
+          search_url: url,
+          search_navigation: searchNavigation,
+          selected_candidate: found.best,
+          candidate_sample: found.candidates,
+          profile_navigation: profileNavigation,
+          verification,
+        });
+        if (verification.ok) {
+          await page.evaluate(() => window.scrollTo(0, 0)).catch(() => {});
+          await sleep(1200);
+          return { ok: true, reason: "verified-profile", attempts, profile_url: page.url() };
+        }
+      } else {
+        attempts.push({
+          search_url: url,
+          search_navigation: searchNavigation,
+          selected_candidate: null,
+          candidate_sample: found.candidates,
+          verification: { ok: false, reason: "no-profile-candidate", url: page.url() },
+        });
       }
+    } else {
+      attempts.push({
+        search_url: url,
+        search_navigation: searchNavigation,
+        selected_candidate: null,
+        verification: { ok: false, reason: "creator-signal-missing", url: page.url() },
+      });
     }
   }
-  return { ok: false, reason: "not-found" };
+  const reason = attempts.at(-1)?.verification?.reason || "not-found";
+  return { ok: false, reason, attempts };
 }
 
 async function extractVisiblePage(page, creator, postDate, reportDate) {
@@ -420,9 +498,28 @@ async function extractVisiblePage(page, creator, postDate, reportDate) {
   }, { creator, postDate, reportDate });
 }
 
+async function collectVisibleProfilePosts(page, creator, postDate, reportDate) {
+  const snapshots = [];
+  for (const top of [0, 700, 1400]) {
+    await page.evaluate((value) => window.scrollTo(0, value), top).catch(() => {});
+    await sleep(900);
+    snapshots.push(await extractVisiblePage(page, creator, postDate, reportDate));
+  }
+  await page.evaluate(() => window.scrollTo(0, 0)).catch(() => {});
+  const posts = uniquePosts(snapshots.flatMap((snapshot) => snapshot.posts || []));
+  const follower = snapshots.map((snapshot) => snapshot.follower).find((item) => item && item.follower_count)
+    || snapshots[0]?.follower
+    || { snapshot_date: reportDate, creator, follower_count: "", captured_at: new Date().toISOString(), page_url: page.url() };
+  return {
+    posts,
+    follower,
+    page_text_excerpt: snapshots.map((snapshot) => snapshot.page_text_excerpt || "").filter(Boolean).join("\n").slice(0, 8000),
+  };
+}
+
 function noteIdFromUrl(url) {
-  const match = String(url || "").match(/\/(?:explore|search_result)\/([^/?#]+)/);
-  return match ? match[1] : String(url || "");
+  const match = String(url || "").match(/\/(?:explore|search_result|discovery\/item)\/([^/?#]+)/);
+  return match ? match[1] : "";
 }
 
 function targetDateTokens(postDate) {
@@ -442,16 +539,15 @@ function targetDateTokens(postDate) {
 
 function hasTargetDateSignal(text, postDate) {
   const value = String(text || "");
-  if (/昨天|1天前|24小时前/.test(value)) return true;
+  if (/昨天|1天前|24小时前/.test(value)) {
+    return dateInShanghai(new Date(Date.now() - 86400000)) === postDate;
+  }
   return targetDateTokens(postDate).some((token) => value.includes(token));
 }
 
-function isYesterdayCandidate(post, creator, postDate) {
-  const text = `${post.title || ""} ${post.body || ""}`;
-  const creatorName = String(creator || "").replace(/^@/, "");
-  return hasTargetDateSignal(text, postDate)
-    && /\/(?:explore|search_result)\//.test(post.url || "")
-    && (!creatorName || text.includes(creatorName) || /\/user\/profile/.test(post.page_url || ""));
+function isProfilePostCandidate(post) {
+  return /\/(?:explore|search_result|discovery\/item)\//.test(post.url || "")
+    && isCreatorProfileUrl(post.page_url || "");
 }
 
 function uniquePosts(posts) {
@@ -471,13 +567,28 @@ function safeFilePart(value) {
   return String(value || "note").replace(/^@/, "").replace(/[^\p{L}\p{N}_-]+/gu, "_").slice(0, 80) || "note";
 }
 
-async function startVisibleMedia(page) {
-  const result = await page.evaluate(() => {
+async function startVisibleMedia(page, requestedRate) {
+  const result = await page.evaluate((requested) => {
     const media = Array.from(document.querySelectorAll("video, audio"));
     let videoCount = 0;
     let audioCount = 0;
     let attempted = 0;
+    let resetToStart = 0;
     const visibleVideos = [];
+    const applyPlaybackRate = (item) => {
+      const candidates = requested === "max"
+        ? [16, 12, 8, 6, 4, 3, 2, 1.5, 1]
+        : [Number(requested), 1];
+      for (const candidate of candidates) {
+        if (!Number.isFinite(candidate) || candidate < 1) continue;
+        try {
+          item.defaultPlaybackRate = candidate;
+          item.playbackRate = candidate;
+          if (Math.abs(item.playbackRate - candidate) < 0.01) return item.playbackRate;
+        } catch (_) {}
+      }
+      return Number.isFinite(item.playbackRate) ? item.playbackRate : 1;
+    };
     for (const item of media) {
       const tag = item.tagName.toLowerCase();
       const rect = item.getBoundingClientRect();
@@ -490,10 +601,12 @@ async function startVisibleMedia(page) {
       try {
         item.muted = true;
         item.loop = false;
-        item.playbackRate = 1;
-        if (Number.isFinite(item.duration) && item.duration > 0 && item.ended) item.currentTime = 0;
-        const promise = item.play();
-        if (promise && typeof promise.catch === "function") promise.catch(() => {});
+        applyPlaybackRate(item);
+        if (tag === "video") {
+          item.currentTime = 0;
+          if (Number.isFinite(item.currentTime) && item.currentTime <= 0.25) resetToStart += 1;
+        }
+        item.pause();
         attempted += 1;
       } catch (_) {}
     }
@@ -509,9 +622,12 @@ async function startVisibleMedia(page) {
       current_time_seconds: currentTime || 0,
       remaining_seconds: remaining,
       duration_known: duration > 0,
+      playback_rate_requested: requested,
+      playback_rate: primary && Number.isFinite(primary.playbackRate) ? primary.playbackRate : 1,
+      started_from_beginning: Boolean(primary && Number.isFinite(primary.currentTime) && primary.currentTime <= 0.25 && resetToStart > 0),
       ended: Boolean(primary && primary.ended),
     };
-  }).catch(() => ({ video_count: 0, audio_count: 0, play_attempted: 0 }));
+  }, requestedRate).catch(() => ({ video_count: 0, audio_count: 0, play_attempted: 0 }));
   return result;
 }
 
@@ -531,32 +647,420 @@ async function mediaPlaybackStatus(page) {
       duration_seconds: duration || 0,
       current_time_seconds: currentTime || 0,
       remaining_seconds: duration > 0 ? Math.max(0, duration - currentTime) : 0,
+      playback_rate: Number.isFinite(primary.playbackRate) ? primary.playbackRate : 1,
     };
   }).catch(() => ({}));
 }
 
-async function clickPostFromProfile(page, post) {
-  const noteId = noteIdFromUrl(post.url);
-  const title = String(post.title || "").slice(0, 28);
-  return page.evaluate(({ noteId, title }) => {
-    const isVisible = (el) => {
-      if (!el || !(el instanceof Element)) return false;
-      const rect = el.getBoundingClientRect();
-      const style = window.getComputedStyle(el);
-      return rect.width > 20 && rect.height > 10 && style.display !== "none" && style.visibility !== "hidden";
+function isPostDetailUrl(url, noteId) {
+  const value = String(url || "");
+  return Boolean(noteId && value.includes(noteId) && /\/(?:explore|discovery\/item|search_result)\//i.test(value));
+}
+
+async function verifyPostDetail(page, noteId) {
+  const url = page.url();
+  const text = await visibleText(page);
+  if (/验证码|验证|风险|异常|安全验证/.test(text)) {
+    return { ok: false, reason: "verification", url };
+  }
+  if (!isPostDetailUrl(url, noteId)) {
+    return { ok: false, reason: "post-url-mismatch", url };
+  }
+  if (/访问的页面不见了|页面不见了|内容无法查看/.test(text)) {
+    return { ok: false, reason: "post-unavailable", url };
+  }
+  return { ok: true, reason: "verified-post-detail", url };
+}
+
+function dateInShanghai(value) {
+  return new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Asia/Shanghai",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).format(value);
+}
+
+function matchesTargetDateEvidence(text, postDate) {
+  const value = String(text || "");
+  if (hasTargetDateSignal(value, postDate)) return true;
+  const relative = value.match(/(\d+)\s*(分钟|小时)前/);
+  if (!relative) return false;
+  const amount = Number(relative[1]);
+  const millis = relative[2] === "小时" ? amount * 3600000 : amount * 60000;
+  return dateInShanghai(new Date(Date.now() - millis)) === postDate;
+}
+
+async function readPostDateEvidence(page, postDate) {
+  const candidates = await page.evaluate(() => {
+    const clean = (value) => String(value || "").replace(/\u200b/g, "").replace(/\s+/g, " ").trim();
+    const selectors = ["time", "[class*='date']", "[class*='time']", "[class*='publish']", "[data-testid*='date']"];
+    const values = [];
+    const seen = new Set();
+    const isCommentElement = (el) => {
+      let node = el;
+      const ancestry = [];
+      for (let i = 0; i < 5 && node; i += 1, node = node.parentElement) ancestry.push(`${node.className || ""} ${node.id || ""}`);
+      return /(comment|reply|评论|回复)/i.test(ancestry.join(" "));
     };
-    const links = Array.from(document.querySelectorAll("a[href]")).filter(isVisible);
-    const byId = links.find((link) => noteId && link.href && link.href.includes(noteId));
-    const byTitle = links.find((link) => {
-      const text = (link.innerText || link.textContent || "").replace(/\s+/g, " ").trim();
-      return title && text.includes(title);
+    selectors.forEach((selector) => {
+      document.querySelectorAll(selector).forEach((el) => {
+        if (isCommentElement(el)) return;
+        const value = clean(el.innerText || el.textContent || el.getAttribute("datetime"));
+        if (!value || value.length > 100 || seen.has(value)) return;
+        seen.add(value);
+        values.push(value);
+      });
     });
-    const target = byId || byTitle;
-    if (!target) return false;
-    target.scrollIntoView({ block: "center", inline: "center" });
-    target.click();
+    return values;
+  }).catch(() => []);
+  const dateLike = candidates.filter((value) => /昨天|今天|\d+\s*(?:分钟|小时|天)前|\d{1,4}[年/.\-]\d{1,2}/.test(value));
+  const matching = dateLike.find((value) => matchesTargetDateEvidence(value, postDate));
+  return {
+    verified: dateLike.length > 0,
+    matches_target: Boolean(matching),
+    evidence: matching || dateLike[0] || "",
+    candidates: dateLike.slice(0, 12),
+    target_date: postDate,
+  };
+}
+
+async function readFullPostText(page) {
+  return page.evaluate(() => {
+    const clean = (value) => String(value || "").replace(/\u200b/g, "").replace(/\s+/g, " ").trim();
+    const isRendered = (el) => {
+      if (!el || !(el instanceof Element)) return false;
+      const style = window.getComputedStyle(el);
+      const rect = el.getBoundingClientRect();
+      return style.display !== "none" && style.visibility !== "hidden" && Number(style.opacity) !== 0 && rect.width > 4 && rect.height > 4;
+    };
+    const isCommentElement = (el) => {
+      const ancestry = [];
+      let node = el;
+      for (let i = 0; i < 5 && node; i += 1, node = node.parentElement) {
+        ancestry.push(`${node.className || ""} ${node.id || ""} ${node.getAttribute?.("data-testid") || ""}`);
+      }
+      return /(comment|reply|评论|回复)/i.test(ancestry.join(" "));
+    };
+    const selectors = [
+      ".note-content .desc",
+      "[class*='note-content'] [class*='desc']",
+      "[class*='noteContent'] [class*='desc']",
+      ".note-content",
+      "[class*='note-content']",
+      "[class*='noteContent']",
+      "[class*='description']",
+      "[class~='desc']",
+      "[data-testid*='note-content']",
+    ];
+    const records = [];
+    const seen = new Set();
+    selectors.forEach((selector, priority) => {
+      document.querySelectorAll(selector).forEach((el) => {
+        if (seen.has(el) || !isRendered(el) || isCommentElement(el)) return;
+        seen.add(el);
+        const text = clean(el.innerText || el.textContent);
+        if (!text || /^(展开|展开全文|查看更多|收起)$/.test(text)) return;
+        records.push({
+          text,
+          source: `dom:${selector}`,
+          score: (selectors.length - priority) * 100000 + Math.min(text.length, 50000),
+        });
+      });
+    });
+    records.sort((a, b) => b.score - a.score);
+    const best = records[0] || null;
+    const expanderPattern = /^(展开全文|展开|全文|查看更多|显示更多|more)$/i;
+    const remainingExpanders = Array.from(document.querySelectorAll("button, a, span, div"))
+      .filter((el) => isRendered(el) && !isCommentElement(el) && expanderPattern.test(clean(el.innerText || el.textContent)))
+      .length;
+    return {
+      text: best ? best.text : "",
+      source: best ? best.source : "none",
+      remaining_expanders: remainingExpanders,
+    };
+  }).catch((error) => ({
+    text: "",
+    source: "error",
+    remaining_expanders: -1,
+    error: String(error && error.message ? error.message : error),
+  }));
+}
+
+async function expandAndReadFullText(page) {
+  let expandedCount = 0;
+  for (let round = 0; round < 6; round += 1) {
+    const clicked = await page.evaluate(() => {
+      const clean = (value) => String(value || "").replace(/\s+/g, " ").trim();
+      const isVisible = (el) => {
+        if (!el || !(el instanceof Element)) return false;
+        const rect = el.getBoundingClientRect();
+        const style = window.getComputedStyle(el);
+        return rect.width > 4 && rect.height > 4 && style.display !== "none" && style.visibility !== "hidden";
+      };
+      const isCommentElement = (el) => {
+        let node = el;
+        const ancestry = [];
+        for (let i = 0; i < 5 && node; i += 1, node = node.parentElement) ancestry.push(`${node.className || ""} ${node.id || ""}`);
+        return /(comment|reply|评论|回复)/i.test(ancestry.join(" "));
+      };
+      const pattern = /^(展开全文|展开|全文|查看更多|显示更多|more)$/i;
+      const targets = Array.from(document.querySelectorAll("button, a, span, div"))
+        .filter((el) => isVisible(el) && !isCommentElement(el) && pattern.test(clean(el.innerText || el.textContent)))
+        .slice(0, 4);
+      targets.forEach((el) => el.click());
+      return targets.length;
+    }).catch(() => 0);
+    expandedCount += clicked;
+    if (!clicked) break;
+    await sleep(900);
+  }
+
+  const scrolled = await page.evaluate(() => {
+    const roots = Array.from(document.querySelectorAll(".note-content, [class*='note-content'], [class*='noteContent'], [role='dialog']"));
+    const scrollable = roots
+      .flatMap((root) => {
+        const values = [];
+        let node = root;
+        for (let i = 0; i < 5 && node; i += 1, node = node.parentElement) values.push(node);
+        return values;
+      })
+      .find((el) => el.scrollHeight > el.clientHeight + 20);
+    if (!scrollable) return false;
+    scrollable.scrollTop = scrollable.scrollHeight;
     return true;
-  }, { noteId, title }).catch(() => false);
+  }).catch(() => false);
+  if (scrolled) {
+    await sleep(700);
+    await page.evaluate(() => {
+      const roots = Array.from(document.querySelectorAll(".note-content, [class*='note-content'], [class*='noteContent'], [role='dialog']"));
+      const scrollable = roots
+        .flatMap((root) => {
+          const values = [];
+          let node = root;
+          for (let i = 0; i < 5 && node; i += 1, node = node.parentElement) values.push(node);
+          return values;
+        })
+        .find((el) => el.scrollHeight > el.clientHeight + 20);
+      if (scrollable) scrollable.scrollTop = 0;
+    }).catch(() => {});
+    await sleep(500);
+  }
+
+  let previousText = "";
+  let stableReads = 0;
+  let snapshot = await readFullPostText(page);
+  for (let attempt = 0; attempt < 6; attempt += 1) {
+    if (snapshot.text && snapshot.text === previousText && snapshot.remaining_expanders === 0) stableReads += 1;
+    else stableReads = 0;
+    if (stableReads >= 2) break;
+    previousText = snapshot.text;
+    await sleep(650);
+    snapshot = await readFullPostText(page);
+  }
+  return {
+    ...snapshot,
+    expanded_count: expandedCount,
+    scroll_completed: scrolled,
+    stable_reads: stableReads,
+    completed: Boolean(snapshot.text && snapshot.source.startsWith("dom:") && snapshot.remaining_expanders === 0 && stableReads >= 2),
+  };
+}
+
+async function readVisibleCaptions(page) {
+  return page.evaluate(() => {
+    const clean = (value) => String(value || "").replace(/\u200b/g, "").replace(/\s+/g, " ").trim();
+    const selectors = ["[class*='subtitle']", "[class*='caption']", "[class*='video-text']", "[data-testid*='caption']"];
+    const values = [];
+    selectors.forEach((selector) => {
+      document.querySelectorAll(selector).forEach((el) => {
+        const rect = el.getBoundingClientRect();
+        const style = window.getComputedStyle(el);
+        const text = clean(el.innerText || el.textContent);
+        if (text && text.length <= 300 && rect.width > 4 && rect.height > 4 && style.display !== "none" && style.visibility !== "hidden") values.push(text);
+      });
+    });
+    return Array.from(new Set(values));
+  }).catch(() => []);
+}
+
+async function setVisibleVideoPlayback(page, shouldPlay, playbackRate) {
+  return page.evaluate(({ play, rate }) => {
+    const videos = Array.from(document.querySelectorAll("video"));
+    const video = videos.find((item) => {
+      const rect = item.getBoundingClientRect();
+      return rect.width > 20 && rect.height > 20;
+    }) || videos[0];
+    if (!video) return false;
+    video.muted = true;
+    video.loop = false;
+    if (Number.isFinite(rate) && rate >= 1) {
+      try {
+        video.defaultPlaybackRate = rate;
+        video.playbackRate = rate;
+      } catch (_) {}
+    }
+    if (!play) {
+      video.pause();
+      return true;
+    }
+    if (!video.ended && video.paused) {
+      const promise = video.play();
+      if (promise && typeof promise.catch === "function") promise.catch(() => {});
+    }
+    return true;
+  }, { play: shouldPlay, rate: playbackRate }).catch(() => false);
+}
+
+function timelineFrameTargets(duration, count) {
+  if (!Number.isFinite(duration) || duration <= 0 || count < 2) return [];
+  const end = Math.max(0, duration - Math.min(0.25, duration * 0.01));
+  return Array.from({ length: count }, (_, index) => {
+    if (index === 0) return 0;
+    if (index === count - 1) return end;
+    return Number(((end * index) / (count - 1)).toFixed(3));
+  });
+}
+
+function hasCompleteVideoFrameCoverage(media, frameSamples, requiredCount) {
+  if (!Number.isInteger(requiredCount) || requiredCount < 1) return false;
+  const samples = Array.isArray(frameSamples) ? frameSamples : [];
+  const missed = Array.isArray(media?.frame_sampling_missed_targets_seconds)
+    ? media.frame_sampling_missed_targets_seconds
+    : [];
+  return Number(media?.frame_sample_count || 0) >= requiredCount
+    && samples.length >= requiredCount
+    && missed.length === 0;
+}
+
+async function playVisibleVideoToCompletion(page, args, captureFrame) {
+  const media = await startVisibleMedia(page, args.videoPlaybackRate);
+  media.visible_caption_samples = [];
+  if (!media.video_count || !media.play_attempted) {
+    media.playback_completed = false;
+    return media;
+  }
+
+  const metadataDeadline = Date.now() + 10000;
+  let initialStatus = await mediaPlaybackStatus(page);
+  while (!initialStatus.duration_seconds && Date.now() < metadataDeadline) {
+    await sleep(100);
+    initialStatus = await mediaPlaybackStatus(page);
+  }
+  if (initialStatus.duration_seconds) {
+    await page.evaluate(() => {
+      const videos = Array.from(document.querySelectorAll("video"));
+      const video = videos.find((item) => {
+        const rect = item.getBoundingClientRect();
+        return rect.width > 20 && rect.height > 20;
+      }) || videos[0];
+      if (!video) return;
+      video.pause();
+      try {
+        if (typeof video.fastSeek === "function") video.fastSeek(0);
+        else video.currentTime = 0;
+      } catch (_) {}
+    }).catch(() => {});
+    await sleep(100);
+    initialStatus = await mediaPlaybackStatus(page);
+  }
+  media.duration_seconds = initialStatus.duration_seconds || media.duration_seconds || 0;
+  media.current_time_seconds = initialStatus.current_time_seconds || 0;
+  media.started_from_beginning = Boolean(initialStatus.current_time_seconds <= 0.25);
+
+  const startedAt = Date.now();
+  let frameCount = 0;
+  let nextTargetIndex = 0;
+  let frameTargets = timelineFrameTargets(media.duration_seconds, args.videoFrameCount);
+  const missedTargets = [];
+  let lastProgress = -1;
+  let lastProgressAt = Date.now();
+  let finalStatus = {};
+  const captureTimelineFrame = async (targetIndex, status) => {
+    const targetSeconds = frameTargets[targetIndex];
+    const rate = status.playback_rate || media.playback_rate || 1;
+    await setVisibleVideoPlayback(page, false, rate);
+    const pausedStatus = await mediaPlaybackStatus(page);
+    const captured = await captureFrame(targetIndex + 1, {
+      target_seconds: Number(targetSeconds.toFixed(3)),
+      actual_seconds: Number((pausedStatus.current_time_seconds || status.current_time_seconds || 0).toFixed(3)),
+      playback_rate: rate,
+    });
+    if (captured) frameCount += 1;
+    else missedTargets.push(Number(targetSeconds.toFixed(3)));
+    nextTargetIndex = targetIndex + 1;
+    if (!pausedStatus.ended) await setVisibleVideoPlayback(page, true, rate);
+    return captured;
+  };
+
+  if (frameTargets.length) {
+    await captureTimelineFrame(0, initialStatus);
+  } else {
+    await setVisibleVideoPlayback(page, true, media.playback_rate || 1);
+  }
+
+  while ((Date.now() - startedAt) / 1000 <= args.maxVideoSeconds) {
+    const status = await mediaPlaybackStatus(page);
+    finalStatus = status;
+    const captions = await readVisibleCaptions(page);
+    for (const caption of captions) {
+      if (!media.visible_caption_samples.includes(caption)) media.visible_caption_samples.push(caption);
+    }
+    const duration = status.duration_seconds || media.duration_seconds || 0;
+    if (!frameTargets.length && duration > 0) frameTargets = timelineFrameTargets(duration, args.videoFrameCount);
+    const nextTarget = frameTargets[nextTargetIndex];
+    if (Number.isFinite(nextTarget) && status.current_time_seconds >= Math.max(0, nextTarget - 0.05)) {
+      const spacing = frameTargets.length > 1 ? frameTargets[1] - frameTargets[0] : 1;
+      const tolerance = Math.max(0.5, spacing * 0.2);
+      if (status.current_time_seconds > nextTarget + tolerance && nextTargetIndex < frameTargets.length - 1) {
+        missedTargets.push(Number(nextTarget.toFixed(3)));
+        nextTargetIndex += 1;
+      } else {
+        await captureTimelineFrame(nextTargetIndex, status);
+      }
+      continue;
+    }
+    const completed = Boolean(
+      status.ended
+      || (duration > 0 && status.current_time_seconds > 0 && status.current_time_seconds >= duration - 0.25)
+    );
+    if (completed) {
+      media.playback_completed = true;
+      break;
+    }
+    const currentProgress = Number.isFinite(status.current_time_seconds) ? status.current_time_seconds : 0;
+    if (currentProgress > lastProgress + 0.05) lastProgressAt = Date.now();
+    lastProgress = currentProgress;
+    if (Date.now() - lastProgressAt >= 30000) {
+      media.playback_stalled = true;
+      break;
+    }
+    if (status.paused) await setVisibleVideoPlayback(page, true, status.playback_rate || media.playback_rate || 1);
+    const spacing = frameTargets.length > 1 ? frameTargets[1] - frameTargets[0] : 5;
+    const rate = Math.max(1, status.playback_rate || media.playback_rate || 1);
+    const pollMs = Math.max(25, Math.min(250, (spacing / rate) * 250));
+    await sleep(pollMs);
+  }
+  if (!frameTargets.length && frameCount === 0) {
+    const captured = await captureFrame(1, {
+      target_seconds: 0,
+      actual_seconds: finalStatus.current_time_seconds || 0,
+      playback_rate: media.playback_rate || 1,
+    });
+    if (captured) frameCount = 1;
+  }
+  media.playback_wait_seconds = Math.round((Date.now() - startedAt) / 1000);
+  media.playback_completed = Boolean(media.playback_completed && media.started_from_beginning);
+  media.playback_limited = Boolean(!media.playback_completed && media.playback_wait_seconds >= args.maxVideoSeconds);
+  media.duration_seconds = finalStatus.duration_seconds || media.duration_seconds || 0;
+  media.current_time_seconds = finalStatus.current_time_seconds || media.current_time_seconds || 0;
+  media.remaining_seconds = finalStatus.remaining_seconds ?? media.remaining_seconds ?? 0;
+  media.playback_rate = finalStatus.playback_rate || media.playback_rate || 1;
+  media.frame_sample_count = frameCount;
+  media.frame_sample_targets_seconds = frameTargets;
+  media.frame_sampling_missed_targets_seconds = missedTargets;
+  media.frame_sampling_strategy = "timeline-equidistant-paused-capture";
+  return media;
 }
 
 function isMissingPage(detail) {
@@ -564,55 +1068,79 @@ function isMissingPage(detail) {
   return /访问的页面不见了|页面不见了|内容无法查看/.test(text);
 }
 
-async function extractDetailPage(page, creator, post, args, postDate, index, profileUrl) {
+async function extractDetailPage(page, creator, post, args, postDate, index) {
   const noteId = noteIdFromUrl(post.url);
   const creatorPart = safeFilePart(creator);
   const notePart = safeFilePart(noteId || index);
   const frameDir = path.join(args.outDir, "frames", `${creatorPart}-${notePart}`);
   fs.mkdirSync(frameDir, { recursive: true });
 
-  let openedByClick = false;
-  if (profileUrl) {
-    await safeGoto(page, profileUrl);
-    await sleep(1200);
-    openedByClick = await clickPostFromProfile(page, post);
-    if (openedByClick) await sleep(4500);
+  const detailNavigation = await safeGoto(page, post.url);
+  const detailVerification = await verifyPostDetail(page, noteId);
+  if (!detailVerification.ok) {
+    return {
+      ...post,
+      published_at: postDate,
+      detail_text: "",
+      analysis_ready: false,
+      capture_status: {
+        content_type: "unknown",
+        detail_navigation: detailNavigation,
+        detail_verification: detailVerification,
+        text_capture_completed: false,
+        video_playback_completed: false,
+        failure_reason: detailVerification.reason,
+      },
+      warnings: [`post detail navigation failed: ${detailVerification.reason}`],
+      extraction_note: "Post detail navigation could not be verified, so this post is excluded from summary and analysis.",
+      detail_captured_at: new Date().toISOString(),
+    };
   }
-  if (!openedByClick) {
-    await safeGoto(page, post.url);
-    await sleep(2500);
+
+  const dateEvidence = await readPostDateEvidence(page, postDate);
+  if (!dateEvidence.matches_target) {
+    const reason = dateEvidence.verified ? "post-date-not-target" : "post-date-unverified";
+    return {
+      ...post,
+      published_at: "",
+      detail_text: "",
+      analysis_ready: false,
+      capture_status: {
+        content_type: "unknown",
+        detail_navigation: detailNavigation,
+        detail_verification: detailVerification,
+        date_evidence: dateEvidence,
+        target_date_match: false,
+        text_capture_completed: false,
+        video_playback_completed: false,
+        failure_reason: reason,
+      },
+      warnings: [`post publishing date check failed: ${reason}`],
+      extraction_note: "The detail page did not verify this post as published on the target date, so no text reading or video playback was performed.",
+      detail_captured_at: new Date().toISOString(),
+    };
   }
-  const media = await startVisibleMedia(page);
+
+  const textCapture = await expandAndReadFullText(page);
   const frames = [];
-  const captureFrame = async (slot) => {
+  const frameSamples = [];
+  const captureFrame = async (slot, sample = {}) => {
     const framePath = path.join(frameDir, `frame-${String(slot).padStart(2, "0")}.png`);
     await page.screenshot({ path: framePath, fullPage: false }).catch(() => {});
-    if (fs.existsSync(framePath) && !frames.includes(framePath)) frames.push(framePath);
-  };
-
-  if (media.play_attempted && media.video_count) {
-    const durationKnown = Boolean(media.duration_known);
-    const targetSeconds = durationKnown
-      ? Math.min(args.maxVideoSeconds, Math.ceil(media.remaining_seconds) + 1)
-      : args.playSeconds;
-    const checkpoints = targetSeconds > 4 ? [0, targetSeconds / 2, targetSeconds] : [0, Math.max(0, targetSeconds)];
-    let elapsed = 0;
-    for (let i = 0; i < checkpoints.length; i += 1) {
-      const waitSeconds = Math.max(0, checkpoints[i] - elapsed);
-      if (waitSeconds) await sleep(waitSeconds * 1000);
-      elapsed += waitSeconds;
-      await captureFrame(i + 1);
+    if (fs.existsSync(framePath) && !frames.includes(framePath)) {
+      frames.push(framePath);
+      frameSamples.push({
+        path: framePath,
+        target_seconds: sample.target_seconds ?? null,
+        actual_seconds: sample.actual_seconds ?? null,
+        playback_rate: sample.playback_rate ?? null,
+      });
+      return true;
     }
-    const status = await mediaPlaybackStatus(page);
-    media.playback_wait_seconds = Math.round(targetSeconds);
-    media.playback_completed = Boolean(
-      durationKnown
-      && (media.ended || status.ended || (status.duration_seconds > 0 && status.remaining_seconds <= 0.75))
-    );
-    media.playback_limited = Boolean(durationKnown && !status.ended && targetSeconds >= args.maxVideoSeconds);
-    media.duration_seconds = status.duration_seconds || media.duration_seconds || 0;
-    media.current_time_seconds = status.current_time_seconds || media.current_time_seconds || 0;
-  } else {
+    return false;
+  };
+  const media = await playVisibleVideoToCompletion(page, args, captureFrame);
+  if (!media.video_count) {
     for (let i = 0; i < 3; i += 1) {
       await captureFrame(i + 1);
       if (i < 2) await sleep(1000);
@@ -820,16 +1348,34 @@ async function extractDetailPage(page, creator, post, args, postDate, index, pro
       .map((img) => img.currentSrc || img.src || img.dataset.src || "")
       .filter(Boolean)
       .slice(0, 8);
-    return { title, description, visible_text: bodyText.slice(0, 12000), metrics: meta, images };
+    return { title, description, visible_text: bodyText, metrics: meta, images };
   }).catch((error) => ({ title: "", description: "", visible_text: "", metrics: {}, images: [], extraction_error: String(error && error.message ? error.message : error) }));
 
   const missingPage = isMissingPage(detail);
+  const isVideo = Boolean(media.video_count);
+  const videoFrameCoverageCompleted = Boolean(
+    !isVideo
+    || hasCompleteVideoFrameCoverage(media, frameSamples, args.videoFrameCount)
+  );
+  const analysisReady = Boolean(
+    !missingPage
+    && (isVideo ? media.playback_completed && videoFrameCoverageCompleted : textCapture.completed)
+  );
+  const failureReason = missingPage
+    ? "post-unavailable"
+    : isVideo && !media.playback_completed
+    ? media.playback_stalled ? "video-playback-stalled" : "video-playback-incomplete"
+    : isVideo && !videoFrameCoverageCompleted
+    ? "video-frame-coverage-incomplete"
+    : !isVideo && !textCapture.completed
+    ? "text-capture-incomplete"
+    : "";
   return {
     ...post,
     published_at: postDate,
     title: missingPage ? post.title : (detail.title || post.title),
     body: missingPage ? post.body : (detail.description || post.body),
-    detail_text: missingPage ? "" : detail.visible_text,
+    detail_text: missingPage ? "" : textCapture.text,
     likes: missingPage ? post.likes : (detail.metrics.likes || post.likes),
     collects: missingPage ? post.collects : (detail.metrics.collects || post.collects),
     comments: missingPage ? post.comments : (detail.metrics.comments || post.comments),
@@ -838,24 +1384,47 @@ async function extractDetailPage(page, creator, post, args, postDate, index, pro
     cover_url: post.cover_url || (detail.images && detail.images[0]) || "",
     media,
     video_frame_paths: frames,
+    video_frame_samples: frameSamples,
+    analysis_ready: analysisReady,
+    capture_status: {
+      content_type: isVideo ? "video" : "text",
+      detail_navigation: detailNavigation,
+      detail_verification: detailVerification,
+      date_evidence: dateEvidence,
+      target_date_match: true,
+      text_capture: textCapture,
+      text_capture_completed: Boolean(textCapture.completed),
+      video_playback_completed: Boolean(media.playback_completed),
+      video_frame_coverage_completed: videoFrameCoverageCompleted,
+      video_frame_count_required: args.videoFrameCount,
+      video_frame_count_captured: frameSamples.length,
+      failure_reason: failureReason,
+    },
     warnings: [
       ...(detail.extraction_error ? [`detail extraction error: ${detail.extraction_error}`] : []),
       ...(!missingPage && !detail.metrics.likes && !detail.metrics.collects && !detail.metrics.comments ? ["engagement metrics not found in visible action bar"] : []),
-      ...(!missingPage && media.video_count && !media.playback_completed ? ["full video playback could not be confirmed; report analysis is based on visible text and sampled frames"] : []),
+      ...(!missingPage && isVideo && !media.playback_completed ? ["full video playback could not be confirmed; this post is excluded from summary and analysis"] : []),
+      ...(!missingPage && isVideo && media.playback_completed && !videoFrameCoverageCompleted ? [`only ${frameSamples.length}/${args.videoFrameCount} required timeline frames were captured; this post is excluded from summary, highlight details, and analysis`] : []),
+      ...(!missingPage && !isVideo && !textCapture.completed ? ["full text expansion and stable reading could not be confirmed; this post is excluded from summary and analysis"] : []),
     ],
     extraction_note: missingPage
-      ? "The script found this post on the creator page, but the detail page could not be opened from the visible browser session; summary falls back to the visible card text."
-      : media.video_count
-      ? media.playback_completed
-        ? `Visible video was played muted through the end (${Math.round(media.duration_seconds || 0)}s) and sampled with screenshots; audio/transcription is available only if visible captions/text are present on page.`
-        : `Visible video was played muted and sampled with screenshots, but full playback completion could not be confirmed within ${media.playback_wait_seconds || args.playSeconds}s; audio/transcription is available only if visible captions/text are present on page.`
-      : "Detail page text and visible images were captured; no playable video element was detected.",
+      ? "The post detail page was unavailable, so this post is excluded from summary and analysis."
+      : isVideo
+      ? media.playback_completed && videoFrameCoverageCompleted
+        ? `Visible video was played muted through the end at ${media.playback_rate || 1}x (${Math.round(media.duration_seconds || 0)}s), with ${media.frame_sample_count || frames.length} timeline-distributed frame samples and visible captions; audio is not transcribed unless captions or on-screen text are exposed.`
+        : media.playback_completed
+        ? `Visible video reached the end, but only ${frameSamples.length}/${args.videoFrameCount} required timeline frames were captured; the post is excluded from summary, highlight details, and analysis.`
+        : `Visible video playback did not reach a verified end within ${media.playback_wait_seconds || 0}s; the post is excluded from summary and analysis.`
+      : textCapture.completed
+      ? `Full visible text was expanded and read to a stable state (${textCapture.text.length} characters, ${textCapture.expanded_count} expansion control(s) activated).`
+      : "Full visible text expansion and stable reading could not be confirmed; the post is excluded from summary and analysis.",
     detail_captured_at: new Date().toISOString(),
   };
 }
 
 async function main() {
   const args = parseArgs(process.argv);
+  const { chromium } = require("playwright");
   const postDate = addDays(args.reportDate, -1);
   const rl = createRl();
   let browser;
@@ -879,68 +1448,106 @@ async function main() {
     const packageFile = path.join(args.outDir, `xhs-watch-package-${args.reportDate}.json`);
     const allPosts = [];
     const allFollowers = [];
+    const candidateDebug = [];
+    const collectionFailures = [];
+    const persistPackage = () => writeJson(packageFile, {
+      schema_version: 3,
+      collector_version: COLLECTOR_VERSION,
+      capture_policy_version: CAPTURE_POLICY_VERSION,
+      report_date: args.reportDate,
+      covered_publishing_date: postDate,
+      creators,
+      posts: allPosts,
+      followers: allFollowers,
+      candidate_debug: candidateDebug,
+      collection_failures: collectionFailures,
+      generated_at: new Date().toISOString(),
+      browser_profile_dir: args.profileDir,
+    });
+    persistPackage();
 
     for (const creator of creators) {
       await page.bringToFront();
       console.log(`\nCreator: ${creator}`);
       console.log("Automatically searching and opening the best matching visible result...");
-      const opened = await autoOpenCreatorPage(page, creator);
+      let opened = await autoOpenCreatorPage(page, creator);
       if (!opened.ok) {
         console.log(`Automatic navigation failed for ${creator}: ${opened.reason}.`);
         const base = await saveDebugSnapshot(page, args.outDir, creator, opened.reason);
         console.log(`Saved debug snapshot: ${base}.txt / .png`);
         if (args.manualFallback) {
-          console.log("Use the browser to open this creator's profile or yesterday's visible posts.");
+          console.log("Use the browser to open this creator's profile.");
           console.log("If Xiaohongshu shows a verification/risk page, solve it manually or skip; this script will not bypass it.");
-          const answer = await ask(rl, "Press Enter to extract the currently visible page, or type s to skip: ");
-          if (answer.toLowerCase() === "s") continue;
+          const answer = await ask(rl, "Press Enter to verify the currently visible profile, or type s to skip: ");
+          if (answer.toLowerCase() !== "s") {
+            const manualVerification = await verifyCreatorProfile(page, creator);
+            if (manualVerification.ok) {
+              opened = { ok: true, reason: "manual-verified-profile", profile_url: page.url(), attempts: opened.attempts || [] };
+            }
+          }
+          if (!opened.ok) console.log(`Manual profile verification failed for ${creator}; skipping extraction.`);
         } else {
-          console.log("Continuing with best-effort extraction from the current page, then moving to the next creator.");
+          console.log("Skipping this creator because a verified profile page was not reached.");
         }
-      } else {
-        console.log(`Opened page for ${creator} via ${opened.reason}. Extracting visible content...`);
+        if (!opened.ok) {
+          candidateDebug.push({
+            creator,
+            navigation_ok: false,
+            navigation_reason: opened.reason,
+            page_url: page.url(),
+            navigation_attempts: opened.attempts || [],
+          });
+          collectionFailures.push({ creator, stage: "creator-navigation", reason: opened.reason, page_url: page.url() });
+          persistPackage();
+          continue;
+        }
       }
+      console.log(`Opened and verified profile for ${creator} via ${opened.reason}. Extracting visible content...`);
 
-      const extracted = await extractVisiblePage(page, creator, postDate, args.reportDate);
-      const likelyPosts = extracted.posts.filter((post) => isYesterdayCandidate(post, creator, postDate));
-      const candidates = uniquePosts(likelyPosts).slice(0, args.detailLimit);
+      const extracted = await collectVisibleProfilePosts(page, creator, postDate, args.reportDate);
+      const candidates = uniquePosts(extracted.posts.filter(isProfilePostCandidate)).slice(0, args.detailLimit);
       const profileUrl = page.url();
       const detailed = [];
       console.log(`Found ${candidates.length} likely target-date post(s) for ${postDate}. Opening detail pages...`);
       for (let i = 0; i < candidates.length; i += 1) {
-        const detail = await extractDetailPage(page, creator, candidates[i], args, postDate, i + 1, profileUrl);
+        const detail = await extractDetailPage(page, creator, candidates[i], args, postDate, i + 1);
         detailed.push(detail);
-        console.log(`  Detail ${i + 1}/${candidates.length}: ${detail.title || "(untitled)"}`);
+        const readiness = detail.analysis_ready ? "analysis-ready" : `excluded (${detail.capture_status?.failure_reason || "incomplete"})`;
+        console.log(`  Detail ${i + 1}/${candidates.length}: ${detail.title || "(untitled)"} - ${readiness}`);
       }
-      allPosts.push(...detailed);
+      const targetDetails = detailed.filter((item) => item.capture_status?.target_date_match === true);
+      allPosts.push(...targetDetails);
       allFollowers.push(extracted.follower);
-      writeJson(packageFile, {
-        schema_version: 2,
-        report_date: args.reportDate,
-        covered_publishing_date: postDate,
-        creators,
-        posts: allPosts,
-        followers: allFollowers,
-        candidate_debug: [
-          ...((fs.existsSync(packageFile) ? JSON.parse(fs.readFileSync(packageFile, "utf8")).candidate_debug : []) || []),
-          {
-            creator,
-            page_url: profileUrl,
-            extracted_post_count: extracted.posts.length,
-            matched_post_count: candidates.length,
-            target_date: postDate,
-            sample_candidates: extracted.posts.slice(0, 12).map((item) => ({
-              title: item.title,
-              body: String(item.body || "").slice(0, 220),
-              url: item.url,
-            })),
-            page_text_excerpt: extracted.page_text_excerpt,
-          },
-        ],
-        generated_at: new Date().toISOString(),
-        browser_profile_dir: args.profileDir,
+      candidateDebug.push({
+        creator,
+        navigation_ok: true,
+        navigation_reason: opened.reason,
+        page_url: profileUrl,
+        navigation_attempts: opened.attempts || [],
+        extracted_post_count: extracted.posts.length,
+        matched_post_count: candidates.length,
+        analysis_ready_count: targetDetails.filter((item) => item.analysis_ready).length,
+        incomplete_detail_count: targetDetails.filter((item) => !item.analysis_ready).length,
+        non_target_or_unverified_count: detailed.length - targetDetails.length,
+        target_date: postDate,
+        sample_candidates: extracted.posts.slice(0, 12).map((item) => ({
+          title: item.title,
+          body: String(item.body || "").slice(0, 220),
+          url: item.url,
+        })),
+        page_text_excerpt: extracted.page_text_excerpt,
       });
-      console.log(`Captured ${detailed.length} detailed yesterday post(s) for ${creator}; follower count: ${extracted.follower.follower_count || "not found"}.`);
+      detailed.filter((item) => !item.analysis_ready && item.capture_status?.failure_reason !== "post-date-not-target").forEach((item) => {
+        collectionFailures.push({
+          creator,
+          stage: "post-detail",
+          reason: item.capture_status?.failure_reason || "incomplete",
+          title: item.title || "",
+          url: item.url || "",
+        });
+      });
+      persistPackage();
+      console.log(`Captured ${targetDetails.filter((item) => item.analysis_ready).length}/${targetDetails.length} analysis-ready target-date post(s) for ${creator}; follower count: ${extracted.follower.follower_count || "not found"}.`);
       await sleep(1800);
     }
 
@@ -953,7 +1560,20 @@ async function main() {
   }
 }
 
-main().catch((error) => {
-  console.error(error);
-  process.exit(1);
-});
+if (require.main === module) {
+  main().catch((error) => {
+    console.error(error);
+    process.exit(1);
+  });
+}
+
+module.exports = {
+  hasCompleteVideoFrameCoverage,
+  isValidIsoDate,
+  isCreatorProfileUrl,
+  isPostDetailUrl,
+  matchesTargetDateEvidence,
+  noteIdFromUrl,
+  parseArgs,
+  timelineFrameTargets,
+};

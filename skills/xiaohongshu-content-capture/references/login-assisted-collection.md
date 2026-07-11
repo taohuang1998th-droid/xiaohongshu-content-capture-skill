@@ -1,6 +1,6 @@
 # Login-Assisted Collection
 
-Use this workflow when the user authorizes Codex to operate inside a browser session that the user logs into manually.
+Use this workflow only for the packaged desktop application or CLI fallback. In Codex/GPT, use `codex-in-app-collection.md` and the in-app browser instead.
 
 ## Boundary
 
@@ -22,6 +22,7 @@ Not allowed:
 - bypass CAPTCHA, device verification, risk checks, or rate limits
 - call private APIs or reverse-engineer app/web endpoints
 - run high-volume crawling or automated scrolling loops
+- add random homepage visits, decoy clicks, stealth patches, or human-simulation behavior intended to evade automation detection
 
 The browser profile is stored in `--profile-dir` so the user's own login can persist between runs. Tell the user where the profile is and that they can delete it to remove the saved browser session.
 
@@ -48,11 +49,13 @@ scripts/collect_with_login.js \
   --out-dir xhs-captures \
   --profile-dir work/xhs-browser-profile \
   --detail-limit 6 \
-  --play-seconds 12
+  --video-playback-rate max \
+  --video-frame-count 6
 ```
 
-The script opens a browser and pauses for manual login. For each creator, it opens Xiaohongshu search and asks the user to open the correct creator/profile/post page before pressing Enter in the terminal.
-After login, the script automatically searches and opens each watched creator. It should only pause if it cannot find a confident match or if Xiaohongshu shows a verification/risk page.
+The script opens a browser and pauses for manual login. After login, it automatically searches for each watched creator and navigates only to a visible `/user/profile/...` candidate. It verifies the final profile URL and account signals before extraction. If verification fails, it skips extraction and writes a debug screenshot/text record instead of reading the search page as a profile.
+
+For each target-date post, the collector verifies the note detail URL. Text/image posts are expanded and reread until stable. Video posts use the highest playback rate supported by the media element and pause at evenly spaced media timestamps for the same six-frame timeline coverage used at normal speed. Incomplete text reads, stalled videos, missing frame coverage, unverified detail pages, and videos that exceed `--max-video-seconds` are retained only as failure diagnostics and are excluded from report summaries, highlight details, and analysis.
 
 Use `--no-manual-fallback` when you want the script to skip failed creators instead of pausing for intervention.
 
@@ -84,3 +87,9 @@ Detail options:
 Do not create or present a CSV unless the user explicitly asks for it. Paste the Markdown report directly in the chat.
 
 To calculate follower change, keep earlier follower snapshots in the collection package or provide a legacy follower export. If only today's snapshot exists, report the change as unknown.
+
+The package records `collector_version`, `capture_policy_version`, per-creator navigation diagnostics, and per-post `analysis_ready`/`capture_status` fields. Treat these fields as the source of truth for whether a post is eligible for analysis.
+
+## Background Mode
+
+`--headless` can run ordinary navigation without a visible Chromium window after a valid login profile already exists, but it is best effort only. A fully unattended strict run is not guaranteed because login/CAPTCHA/risk prompts need the user and background/headless media may be throttled or behave differently. Do not mark a video analysis-ready unless end state and all required timeline frames are verified, regardless of headless status.

@@ -72,22 +72,52 @@ Read `references/visible-page-collection.md` before helping the user install or 
 
 ## Login-Assisted Browser Collection
 
-When the user explicitly authorizes use of their own logged-in Xiaohongshu account, use `scripts/collect_with_login.js`.
+### Codex In-App Browser (Primary In Codex/GPT)
+
+When this skill is invoked from the Codex or GPT interface, use the `browser:control-in-app-browser` skill as the only browser collection surface. Do not launch `scripts/collect_with_login.js`, do not ask the user to run a terminal command, and do not fall back to standalone Playwright when the in-app browser needs login.
+
+Read `references/codex-in-app-collection.md` before starting this workflow.
+
+Required authorization and user action:
+
+- Show the Codex in-app browser and open `https://www.xiaohongshu.com/`.
+- Ask the user to sign in directly inside that visible browser if the session is not already authenticated.
+- The user authorizes Codex to navigate public pages visible to their account, read visible DOM content, click visible expansion/play controls, and take screenshots for this brief.
+- Never ask for or read the user's password, SMS code, cookies, local-storage values, or session tokens. Do not control the credential-entry step.
+
+After the user confirms that login is complete:
+
+1. Read the configured watchlist.
+2. For each creator, use one focused Xiaohongshu user-search page, identify a visible `/user/profile/...` link, navigate directly to it, and verify the final URL, creator name, and profile signals.
+3. Inspect only a bounded set of recent visible post cards. Open each candidate detail URL and verify its note ID and target publishing date.
+4. For text/image posts, use visible controls to expand the full text, then read the scoped post-content container repeatedly until stable and no expansion control remains.
+5. For video posts, verify playback starts at the beginning, select the highest speed exposed by the visible player, and poll its visible media state until the browser reports the end. Sample the same number of timeline-distributed frames as a normal-speed run: pause at each target timestamp, capture the frame/captions, then resume at the highest speed. Record the actual rate and sample timestamps. If the video cannot be confirmed from beginning to end, exclude it from summary, highlights, and analysis.
+6. Build the internal collection package with `collector_version: codex-iab-1.0.0`, navigation diagnostics, and per-post completion fields.
+7. Run the report generator internally, archive one merged report for the date, and paste the report body directly in the chat.
+
+If the in-app browser shows a CAPTCHA, verification page, or login prompt, pause and ask the user to handle it in the visible browser. Do not switch to another browser surface to work around authentication.
+
+### Standalone Browser (Desktop App/CLI Fallback)
+
+Use `scripts/collect_with_login.js` only when running from the packaged desktop application or a CLI environment that can start its own visible browser. This is not the Codex/GPT interface workflow.
 
 The workflow is:
 
 1. If no watchlist exists, prompt the user for creator handles and save them to `config/creators.txt`.
 2. Open a visible Chromium window with a local profile directory.
 3. Let the user log in manually.
-4. For each watched creator, automatically open Xiaohongshu search, click the best matching creator/profile result, and wait for the page to render.
-5. Detect likely yesterday posts, open each post detail page, and extract visible title/body/metrics/source link.
-6. If a visible video element is present, play it muted in the user's logged-in browser until the browser reports the video has ended, or until the configured maximum video wait time is reached. Save screenshot frames across playback for AI-assisted visual review. Do not claim audio transcription unless captions or text are visible. If full playback cannot be confirmed, say so explicitly in the brief.
-7. Save an internal JSON collection package.
-8. Generate the Markdown brief with `scripts/daily_brief.py --package ... --archive-dir ... --no-stdout` so the terminal only shows saved paths, then read the saved Markdown file and paste the report body directly in the Codex/GPT chat.
+4. For each watched creator, automatically open Xiaohongshu search, select a visible `/user/profile/...` result, navigate to it, and verify the final URL, creator name, and profile signals before extracting anything. Never treat a search-results page as a creator profile.
+5. Detect likely yesterday posts and navigate to each post's visible source URL. Verify that the final detail URL contains the target note ID before extraction.
+6. For a text/image post, activate visible `展开全文`/`查看更多` controls, read the full visible post-text container repeatedly until the text is stable and no expansion control remains, and record `text_capture_completed=true`. If completion cannot be confirmed, exclude the post from summary and analysis.
+7. For a video post, play it muted at the highest rate supported by the visible media element and poll until the browser reports that the video ended. Pause at evenly spaced media timestamps to save the configured number of frames, then resume at the same maximum rate. Record the actual playback rate, target timestamps, actual timestamps, and visible caption samples. If playback stalls or reaches the configured maximum without a verified end, record `playback_completed=false` and exclude the post from summary, highlights, and analysis. Do not claim audio transcription unless captions or text are visible.
+8. Save an internal JSON collection package with collector version, navigation diagnostics, text/video completion status, and failure reasons.
+9. Generate the Markdown brief with `scripts/daily_brief.py --package ... --archive-dir ... --no-stdout` so the terminal only shows saved paths, then read the saved Markdown file and paste the report body directly in the Codex/GPT chat.
 
 Pause for user intervention only when automatic navigation cannot find the creator page or Xiaohongshu shows a verification/risk page.
 
 Do not ask for the user's password, SMS code, cookies, or session token. Do not bypass CAPTCHA, device verification, risk checks, or rate limits.
+
+Do not add random homepage visits, decoy clicks, stealth patches, fingerprint changes, or human-simulation behavior intended to evade Xiaohongshu's automation detection. Use bounded direct navigation, conservative request volume, deterministic load waits, and stop immediately for verification or risk controls.
 
 Read `references/login-assisted-collection.md` before running this workflow.
 
@@ -103,7 +133,7 @@ python3 scripts/daily_brief.py \
   --no-stdout
 ```
 
-Use `--archive-dir` for normal daily operation. It writes a non-overwriting dated Markdown report and appends to `index.md` so prior reports can be browsed later. When the user wants the report shown in the conversation, read the saved Markdown file and paste the report body in chat. Do not make the user read the terminal output.
+Use `--archive-dir` for normal daily operation. It writes one canonical Markdown report per report date (`YYYY-MM-DD.md`). Repeated captures on the same day are merged and deduplicated into that report, while reports from earlier dates remain unchanged. `index.md` contains one history entry per report date. When the user wants the report shown in the conversation, read the saved Markdown file and paste the report body in chat. Do not make the user read the terminal output.
 
 Date behavior:
 
@@ -119,6 +149,7 @@ For each watched creator, include:
 - follower count on the report day or latest available snapshot
 - follower change versus the previous day
 - yesterday's published post summaries based on detail-page text and, for videos, full visible playback plus sampled frames/captions when available
+- a highlight-details section immediately after each content summary and before content analysis, grounded in concrete text, frame/caption evidence, structure, and engagement ratios
 - content analysis for each post and an overall analysis section
 - likes, collects, comments for each yesterday post
 - original Xiaohongshu link for each post
@@ -129,15 +160,30 @@ If a creator has no matching post yesterday, show that explicitly.
 
 Report history requirements:
 
-- Never overwrite older daily reports.
-- Save generated reports into a dated archive directory with unique filenames.
-- Maintain an `index.md` history file with report date, covered publishing date, language, detail level, watched creators, and source package path.
+- Keep exactly one merged report per report date. A later capture on the same day updates that day's report after merging and deduplicating structured source data.
+- Never overwrite reports from an earlier date.
+- Save daily reports into a dated archive directory using `YYYY-MM-DD.md` filenames. Internal merge state may be stored under `.report-state/`.
+- Maintain an `index.md` history file with one entry per report date, including the covered publishing date, language, detail level, watched creators, and source package path.
 - When running inside Codex/GPT, display the newly generated report directly in the chat after saving it.
 
 For video posts, each post must include two separate natural-language paragraphs:
 
 - a video content summary paragraph that describes what the video is about, using visible title, body text, captions, on-screen text, and sampled frames from full playback
+- a highlight-details paragraph that names concrete visual, structural, caption, timeline-frame, or engagement details
 - a video analysis paragraph that interprets why the content may work, what audience or hook it targets, and what can be learned from it
+
+Strict completeness rule:
+
+- Generate summaries and analysis only for posts with `analysis_ready=true`, or for compatible user-provided legacy exports that do not use collector completion fields.
+- A text/image post is analysis-ready only after full visible text expansion and stable rereading are confirmed.
+- A video post is analysis-ready only after the visible browser confirms playback reached the end and every required timeline frame was successfully captured at its intended point.
+- List incomplete captures with their source links and failure reasons, but do not summarize or analyze their content.
+
+## Background Operation
+
+The workflow cannot promise fully unattended background execution. Initial login, CAPTCHA, device verification, and risk prompts require the user in a visible browser. Browsers and operating systems may also throttle or pause hidden-tab media, which would invalidate strict end-of-video and frame-timestamp checks.
+
+After an authenticated session is already available, collection may keep the browser out of the way while ordinary DOM reads and navigation run. Bring it to the foreground whenever playback progress, screenshots, or verification cannot be reliably observed. Treat `--headless` as a best-effort desktop/CLI option, not as proof that a strict video capture is complete.
 
 ## Scripts
 

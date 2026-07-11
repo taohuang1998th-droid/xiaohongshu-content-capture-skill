@@ -2,6 +2,9 @@ const { app, BrowserWindow, dialog, ipcMain, shell } = require("electron");
 const path = require("path");
 const fs = require("fs");
 const { spawn } = require("child_process");
+const { enumOption, integerOption, isValidIsoDate, normalizeCreators } = require("./config");
+
+const MAX_CAPTURED_OUTPUT_CHARS = 2_000_000;
 
 const repoRoot = path.resolve(__dirname, "..", "..");
 const desktopRoot = app.isPackaged ? process.resourcesPath : path.resolve(__dirname, "..");
@@ -19,6 +22,7 @@ const reportScript = path.join(skillRoot, "scripts", "daily_brief.py");
 
 let mainWindow;
 let activeRun = null;
+let runInProgress = false;
 
 function createWindow() {
   mainWindow = new BrowserWindow({
@@ -31,10 +35,15 @@ function createWindow() {
       preload: path.join(__dirname, "preload.js"),
       contextIsolation: true,
       nodeIntegration: false,
+      sandbox: true,
     },
   });
 
+  mainWindow.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
   mainWindow.loadFile(path.join(__dirname, "renderer", "index.html"));
+  mainWindow.on("closed", () => {
+    mainWindow = null;
+  });
 }
 
 app.whenReady().then(createWindow);
@@ -63,14 +72,6 @@ function send(channel, payload) {
   }
 }
 
-function normalizeCreators(input) {
-  return String(input || "")
-    .split(/[\n,，;；]+/)
-    .map((item) => item.trim())
-    .filter(Boolean)
-    .map((item) => (item.startsWith("@") ? item : `@${item}`));
-}
-
 function todayShanghai() {
   const parts = new Intl.DateTimeFormat("en-CA", {
     timeZone: "Asia/Shanghai",
@@ -95,21 +96,32 @@ function runProcess(command, args, options = {}) {
 
     let stdout = "";
     let stderr = "";
+    let settled = false;
+    const appendOutput = (current, value) => {
+      const next = current + value;
+      return next.length <= MAX_CAPTURED_OUTPUT_CHARS ? next : next.slice(-MAX_CAPTURED_OUTPUT_CHARS);
+    };
+    const finish = (error, result) => {
+      if (settled) return;
+      settled = true;
+      if (options.track && activeRun === child) activeRun = null;
+      if (error) reject(error);
+      else resolve(result);
+    };
     child.stdout.on("data", (chunk) => {
       const text = chunk.toString();
-      stdout += text;
+      stdout = appendOutput(stdout, text);
       send("run-log", { stream: "stdout", text });
     });
     child.stderr.on("data", (chunk) => {
       const text = chunk.toString();
-      stderr += text;
+      stderr = appendOutput(stderr, text);
       send("run-log", { stream: "stderr", text });
     });
-    child.on("error", reject);
+    child.on("error", (error) => finish(error));
     child.on("close", (code) => {
-      if (options.track && activeRun === child) activeRun = null;
-      if (code === 0) resolve({ stdout, stderr });
-      else reject(new Error(`${path.basename(command)} exited with code ${code}\n${stderr}`));
+      if (code === 0) finish(null, { stdout, stderr });
+      else finish(new Error(`${path.basename(command)} exited with code ${code}\n${stderr}`));
     });
   });
 }
@@ -122,8 +134,20 @@ function commandExists(command, args = []) {
     windowsHide: true,
   });
   return new Promise((resolve) => {
-    result.on("error", () => resolve(false));
-    result.on("close", (code) => resolve(code === 0));
+    let settled = false;
+    let timer;
+    const finish = (value) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(value);
+    };
+    timer = setTimeout(() => {
+      result.kill();
+      finish(false);
+    }, 5000);
+    result.on("error", () => finish(false));
+    result.on("close", (code) => finish(code === 0));
   });
 }
 
@@ -163,15 +187,19 @@ ipcMain.handle("choose-output-dir", async () => {
 
 ipcMain.handle("open-path", async (_event, targetPath) => {
   if (!targetPath) return;
-  await shell.openPath(targetPath);
+  const resolved = path.resolve(String(targetPath));
+  if (!fs.existsSync(resolved)) throw new Error(`Path does not exist: ${resolved}`);
+  const error = await shell.openPath(resolved);
+  if (error) throw new Error(error);
 });
 
 ipcMain.handle("cancel-run", () => {
   if (activeRun) {
     activeRun.kill("SIGTERM");
-    activeRun = null;
     send("run-log", { stream: "stderr", text: "\nRun cancelled by user.\n" });
+    return true;
   }
+  return false;
 });
 
 async function startRun(rawConfig) {
@@ -181,18 +209,19 @@ async function startRun(rawConfig) {
   if (!creators.length) throw new Error("Please add at least one creator handle.");
 
   const reportDate = rawConfig.reportDate || todayShanghai();
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(reportDate)) {
+  if (!isValidIsoDate(reportDate)) {
     throw new Error("Report date must use YYYY-MM-DD.");
   }
 
-  const language = rawConfig.language || "中文";
-  const detail = rawConfig.detail || "普通";
-  const detailLimit = String(rawConfig.detailLimit || 6);
-  const playSeconds = String(rawConfig.playSeconds || 8);
-  const baseDir = rawConfig.outputDir || appDataDir();
+  const language = enumOption(rawConfig.language, "中文", ["中文", "英文", "双语"], "Language");
+  const detail = enumOption(rawConfig.detail, "普通", ["极简", "普通", "详细"], "Detail level");
+  const detailLimit = integerOption(rawConfig.detailLimit, 6, 1, 50, "Creator post limit");
+  const videoFrameCount = integerOption(rawConfig.videoFrameCount, 6, 4, 24, "Video frame count");
+  const baseDir = path.resolve(String(rawConfig.outputDir || appDataDir()));
   const runDir = path.join(baseDir, `xhs-run-${reportDate}-${Date.now()}`);
   const outDir = path.join(runDir, "captures");
   const profileDir = path.join(baseDir, "xhs-browser-profile");
+  const archiveDir = path.join(baseDir, "daily-reports");
   const creatorsFile = path.join(runDir, "creators.txt");
 
   fs.mkdirSync(runDir, { recursive: true });
@@ -209,8 +238,9 @@ async function startRun(rawConfig) {
       "--report-date", reportDate,
       "--out-dir", outDir,
       "--profile-dir", profileDir,
-      "--detail-limit", detailLimit,
-      "--play-seconds", playSeconds,
+      "--detail-limit", String(detailLimit),
+      "--video-playback-rate", "max",
+      "--video-frame-count", String(videoFrameCount),
     ], {
       track: true,
       env: {
@@ -224,7 +254,7 @@ async function startRun(rawConfig) {
     if (!fs.existsSync(packageFile)) throw new Error(`Collection package was not created: ${packageFile}`);
 
     const python = await resolvePython();
-    const report = await runProcess(python.command, [
+    await runProcess(python.command, [
       ...python.args,
       reportScript,
       "--package", packageFile,
@@ -232,12 +262,16 @@ async function startRun(rawConfig) {
       "--report-date", reportDate,
       "--language", language,
       "--detail", detail,
+      "--archive-dir", archiveDir,
+      "--no-stdout",
     ]);
 
-    const reportPath = path.join(runDir, "report.md");
-    fs.writeFileSync(reportPath, report.stdout, "utf8");
-    send("run-state", { running: false, runDir, report: report.stdout, reportPath, packageFile });
-    return { ok: true, runDir, report: report.stdout, reportPath, packageFile };
+    const reportPath = path.join(archiveDir, `${reportDate}.md`);
+    const historyPath = path.join(archiveDir, "index.md");
+    if (!fs.existsSync(reportPath)) throw new Error(`Daily report was not created: ${reportPath}`);
+    const report = fs.readFileSync(reportPath, "utf8");
+    send("run-state", { running: false, runDir, report, reportPath, historyPath, packageFile });
+    return { ok: true, runDir, report, reportPath, historyPath, packageFile };
   } catch (error) {
     send("run-state", { running: false, runDir, error: error.message });
     throw error;
@@ -245,9 +279,13 @@ async function startRun(rawConfig) {
 }
 
 ipcMain.handle("start-run", async (_event, rawConfig) => {
+  if (runInProgress) return { ok: false, error: "A collection run is already active." };
+  runInProgress = true;
   try {
     return await startRun(rawConfig);
   } catch (error) {
     return { ok: false, error: error.message };
+  } finally {
+    runInProgress = false;
   }
 });

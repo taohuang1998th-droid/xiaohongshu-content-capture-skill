@@ -46,6 +46,15 @@ The app opens a local window where users can:
 - choose minimal, normal, or detailed report depth
 - start a visible browser collection run
 - preview and open the generated Markdown brief
+- merge repeated same-day captures into one report and open the historical report index
+
+## Validation
+
+```bash
+npm run check
+```
+
+This runs JavaScript syntax checks plus Node and Python regression tests without launching the browser.
 
 ## Runtime Boundary
 

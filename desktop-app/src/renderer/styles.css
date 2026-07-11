@@ -151,16 +151,6 @@ textarea:focus {
   color: #fff;
 }
 
-input[type="range"] {
-  width: 100%;
-  accent-color: var(--accent);
-}
-
-output {
-  color: var(--muted);
-  font-size: 13px;
-}
-
 .path-field > div {
   display: grid;
   grid-template-columns: 1fr auto;

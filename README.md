@@ -53,6 +53,15 @@ npm start
 
 This app is intended for users who do not use Codex. It provides a local UI for creator watchlist entry, language/detail selection, visible-browser collection, logs, and Markdown report preview.
 
+Desktop runs merge repeated captures for the same report date into `daily-reports/YYYY-MM-DD.md`. The adjacent `daily-reports/index.md` keeps one historical entry per report date.
+
+Run the cross-platform regression suite before packaging:
+
+```bash
+cd desktop-app
+npm run check
+```
+
 To build a macOS installer image:
 
 ```bash
