@@ -27,13 +27,13 @@ Restart Codex after installation so the new skill is discovered.
 
 The skill ships with no default creators. On first use, it prompts for Xiaohongshu creator handles and saves them to `config/creators.txt`.
 
-The report can be generated in Chinese, English, or bilingual form, and in minimal, normal, or detailed form:
+The default report is bilingual and detailed. It can also be generated in Chinese, English, or bilingual form, and in minimal, normal, or detailed form:
 
 ```bash
 python3 scripts/daily_brief.py \
   --package xhs-captures/xhs-watch-package-2026-07-06.json \
-  --language 中文 \
-  --detail 普通
+  --language 双语 \
+  --detail 详细
 ```
 
 ## Safety Boundary

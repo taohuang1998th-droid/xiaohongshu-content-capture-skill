@@ -9,13 +9,13 @@ Use this skill to generate a daily traffic/content brief for a user-configured X
 
 ## Report Options
 
-When generating a brief, ask or infer two output preferences:
+Unless the user explicitly requests otherwise, generate a bilingual detailed brief (`--language bilingual --detail detailed`). The user can still select another option:
 
 - `--language zh` or `--language 中文`: Chinese brief.
 - `--language en` or `--language 英文`: English brief.
 - `--language bilingual` or `--language 双语`: Chinese-English bilingual brief.
 - `--detail minimal` or `--detail 极简`: shortest brief with core post summary and source links.
-- `--detail normal` or `--detail 普通`: default brief with summaries, analysis, metrics, and links.
+- `--detail normal` or `--detail 普通`: standard brief with summaries, analysis, metrics, and links.
 - `--detail detailed` or `--detail 详细`: full brief with extraction notes, sampled frame paths, and overall analysis.
 
 The report script localizes structure, labels, and built-in analysis heuristics. When the user requests English or bilingual output, translate or polish captured Chinese source summaries in the final chat-visible report instead of leaving them as raw Chinese unless preserving the original wording is important evidence.
@@ -127,8 +127,8 @@ Read `references/login-assisted-collection.md` before running this workflow.
 python3 scripts/daily_brief.py \
   --report-date 2026-07-06 \
   --package xhs-captures/xhs-watch-package-2026-07-06.json \
-  --language 中文 \
-  --detail 普通 \
+  --language 双语 \
+  --detail 详细 \
   --archive-dir daily-reports \
   --no-stdout
 ```

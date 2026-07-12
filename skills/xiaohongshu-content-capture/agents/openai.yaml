@@ -1,4 +1,4 @@
 interface:
   display_name: "Xiaohongshu Content Capture"
   short_description: "Capture and analyze watched Xiaohongshu creator content"
-  default_prompt: "Use $xiaohongshu-content-capture to configure my Xiaohongshu creator watchlist, capture yesterday's posts, and show a Chinese/English/bilingual brief in minimal/normal/detailed form."
+  default_prompt: "Use $xiaohongshu-content-capture to capture yesterday's watched Xiaohongshu posts and show the default bilingual detailed brief."

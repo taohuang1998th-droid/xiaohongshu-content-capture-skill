@@ -121,8 +121,6 @@ class DailyBriefTests(unittest.TestCase):
                     "--package", str(package_path),
                     "--creators-file", str(creators),
                     "--report-date", "2026-07-11",
-                    "--language", "双语",
-                    "--detail", "详细",
                     "--archive-dir", str(archive),
                     "--no-stdout",
                 ], capture_output=True, text=True, check=False)
@@ -136,6 +134,8 @@ class DailyBriefTests(unittest.TestCase):
             self.assertIn("更新标题", report)
             self.assertNotIn("初次标题", report)
             self.assertEqual(history.count("| report_date: 2026-07-11 "), 1)
+            self.assertIn("| language: bilingual ", history)
+            self.assertIn("| detail: detailed ", history)
             self.assertNotIn("# 小红书", second.stdout)
 
 

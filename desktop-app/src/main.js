@@ -213,8 +213,8 @@ async function startRun(rawConfig) {
     throw new Error("Report date must use YYYY-MM-DD.");
   }
 
-  const language = enumOption(rawConfig.language, "中文", ["中文", "英文", "双语"], "Language");
-  const detail = enumOption(rawConfig.detail, "普通", ["极简", "普通", "详细"], "Detail level");
+  const language = enumOption(rawConfig.language, "双语", ["中文", "英文", "双语"], "Language");
+  const detail = enumOption(rawConfig.detail, "详细", ["极简", "普通", "详细"], "Detail level");
   const detailLimit = integerOption(rawConfig.detailLimit, 6, 1, 50, "Creator post limit");
   const videoFrameCount = integerOption(rawConfig.videoFrameCount, 6, 4, 24, "Video frame count");
   const baseDir = path.resolve(String(rawConfig.outputDir || appDataDir()));

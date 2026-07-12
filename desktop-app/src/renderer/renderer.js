@@ -1,6 +1,6 @@
 const state = {
-  language: "中文",
-  detail: "普通",
+  language: "双语",
+  detail: "详细",
   running: false,
   cancelRequested: false,
   runDir: "",
